@@ -1,20 +1,15 @@
-# macOS 目录元数据（可能含本机文件路径，不进仓库）
 .DS_Store
 ._*
 
-# 运行时凭证与日志：这些只应存在于 ~/.workbuddy2api 与 ~/.pi/agent，
-# 任何情况下都不要提交进仓库
 *.session.json
 .codebuddy-session.json
 workbuddy-desktop*.info
 *.jsonl
 *.log
 
-# 环境变量文件
 .env
 .env.*
 
-# 依赖与缓存
 node_modules/
 __pycache__/
 *.pyc
