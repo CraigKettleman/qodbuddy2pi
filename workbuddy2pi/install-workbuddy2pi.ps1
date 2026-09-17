@@ -83,7 +83,7 @@ if (-not (Get-Command pi -ErrorAction SilentlyContinue)) {
   Write-Step "安装 Pi Coding Agent..."
   npm install -g --ignore-scripts @earendil-works/pi-coding-agent
   if (-not (Get-Command pi -ErrorAction SilentlyContinue)) {
-    Write-Fail "pi 安装后未找到, 请关闭终端重新打开再试"
+    Write-Fail "真奇怪，pi 安装后还是没找到，https://pi.dev/，手动到官网安装后再运行这个脚本"
   }
 }
 Write-Step "Pi $(pi --version 2>$null)"
