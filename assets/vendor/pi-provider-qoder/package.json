@@ -1,0 +1,55 @@
+{
+  "name": "pi-provider-qoder",
+  "version": "0.4.5",
+  "description": "Pi extension for Qoder AI — with OAuth authentication, COSY signatures and WAF bypass",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "qoder",
+    "ai",
+    "provider"
+  ],
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@earendil-works/pi-ai --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-ai/compat",
+    "check": "node node_modules/typescript/bin/tsc --noEmit",
+    "lint": "node node_modules/@biomejs/biome/bin/biome check .",
+    "lint:fix": "node node_modules/@biomejs/biome/bin/biome check --write .",
+    "format": "node node_modules/@biomejs/biome/bin/biome format --write .",
+    "test": "vitest run",
+    "test:live": "tsx scripts/record-live-fixtures.ts",
+    "test:watch": "vitest",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run check && npm run build"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "esbuild": "^0.28.1",
+    "tsx": "^4.23.13",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.9"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/simonsmh/pi-provider-qoder.git"
+  },
+  "bugs": {
+    "url": "https://github.com/simonsmh/pi-provider-qoder/issues"
+  },
+  "homepage": "https://github.com/simonsmh/pi-provider-qoder#readme"
+}

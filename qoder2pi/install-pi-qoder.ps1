@@ -5,7 +5,7 @@
 .DESCRIPTION
   对应 bash 版 install-pi-qoder.sh, 逻辑一致:
   1. 检查/安装 Node.js 与 Pi 本体
-  2. 安装 pi-provider-qoder 扩展 (负责 OAuth/PAT 登录、COSY 签名、token 刷新、模型目录)
+  2. 安装 pi-provider-qoder 扩展 (来自本仓库 assets/vendor，不连 npm)
   3. 用 PAT 自动登录或提示手动 /login
   4. 验证模型列表
 
@@ -84,12 +84,17 @@ if (-not $pi) {
 Write-Step "Pi $(pi --version 2>$null)"
 
 # ---------- 3. qoder provider 扩展 ----------
+# provider 扩展用本仓库 assets/vendor 下的副本安装，不再从 npm 拉取
+$VendorQoder = Join-Path (Split-Path -Parent $PSScriptRoot) "assets\vendor\pi-provider-qoder"
+if (-not (Test-Path (Join-Path $VendorQoder "package.json"))) {
+  Write-Fail "缺少本仓库自带的 qoder 扩展: $VendorQoder (请在完整仓库里运行本脚本)"
+}
 $piList = (pi list 2>$null | Out-String)
 if ($piList -match "pi-provider-qoder") {
   Write-Step "pi-provider-qoder 已安装, 跳过"
 } else {
-  Write-Step "安装 pi-provider-qoder 扩展..."
-  pi install npm:pi-provider-qoder
+  Write-Step "安装 pi-provider-qoder 扩展 (来自本仓库 assets\vendor)..."
+  pi install $VendorQoder
 }
 
 # ---------- 4. 登录 ----------

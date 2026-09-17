@@ -33,6 +33,10 @@ fi
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m错误:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# provider 扩展用本仓库 assets/vendor 下的副本安装，不再从 npm 拉取
+VENDOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../assets/vendor" && pwd)"
+VENDOR_QODER="$VENDOR_DIR/pi-provider-qoder"
+
 # ---------- 1. Node.js ----------
 if ! command -v node >/dev/null 2>&1; then
   log "未检测到 Node.js"
@@ -53,11 +57,14 @@ fi
 log "Pi $(pi --version 2>/dev/null || echo '?')"
 
 # ---------- 3. qoder provider 扩展 ----------
-if pi list 2>/dev/null | grep -q "pi-provider-qoder"; then
+# 本地路径安装时 `pi list` 显示的是该路径，而路径末段就是包名，所以下面的判定依然成立
+[[ -f "$VENDOR_QODER/package.json" ]] \
+  || fail "缺少本仓库自带的 qoder 扩展：$VENDOR_QODER（请在完整仓库里运行本脚本）"
+if pi list 2>/dev/null | grep -qF "pi-provider-qoder"; then
   log "pi-provider-qoder 已安装,跳过"
 else
-  log "安装 pi-provider-qoder 扩展..."
-  pi install npm:pi-provider-qoder
+  log "安装 pi-provider-qoder 扩展(来自本仓库 assets/vendor)..."
+  pi install "$VENDOR_QODER"
 fi
 
 # ---------- 4. 登录 ----------

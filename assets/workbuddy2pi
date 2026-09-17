@@ -1,0 +1,1002 @@
+#!/usr/bin/env node
+/**
+ * workbuddy2pi — WorkBuddy 反代（codebuddy_proxy）的运维命令。
+ *
+ * 由 workbuddy2pi/install-workbuddy2pi.sh（或 .ps1）安装到用户 PATH 上，
+ * 也可以在仓库里直接执行：node workbuddy2pi/resources/bin/workbuddy2pi
+ *
+ * 平台：macOS（launchd）、Linux（systemd --user）、Windows（计划任务）。
+ *
+ * 账号为什么靠“复制 + 按 uid 识别”而不是“符号链接 + 重指”：
+ *   反代启动时把唯一个 session 文件读进内存，刷新 token 时又整文件覆盖回写，
+ *   所以切换只能换文件内容 + 重启进程。Windows 创建符号链接需要管理员权限或
+ *   开发者模式，因此统一采用复制方式：切换时先把当前生效文件存回它所属的
+ *   slot（通过文件里的 account.uid 判定归属），再写入目标 slot 的内容。
+ *   用 uid 而不是另存一个“当前账号”标记文件，是为了让中断也不会损坏凭证。
+ */
+
+'use strict';
+
+const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const http = require('http');
+const https = require('https');
+const { spawnSync } = require('child_process');
+
+const PORT = 8787;
+const BASE = `http://127.0.0.1:${PORT}`;
+const HOME = os.homedir();
+const DATA_DIR = path.join(HOME, '.workbuddy2api');
+const SLOTS_DIR = path.join(DATA_DIR, 'sessions');
+const VENDOR_DIR = path.join(DATA_DIR, 'vendor');
+const LIVE = path.join(HOME, '.codebuddy-session.json');
+const ACCOUNTS_LIB = path.join(HOME, '.wb-switch', 'accounts.json');
+const EXTENSION = path.join(HOME, '.pi', 'agent', 'extensions', 'workbuddy.ts');
+const AUTH_JSON = path.join(HOME, '.pi', 'agent', 'auth.json');
+const ENDPOINT = 'https://copilot.tencent.com';
+
+const IS_MAC = process.platform === 'darwin';
+const IS_LINUX = process.platform === 'linux';
+const IS_WIN = process.platform === 'win32';
+
+const USER = (() => {
+  try {
+    return os.userInfo().username;
+  } catch {
+    return process.env.USER || process.env.USERNAME || 'user';
+  }
+})();
+
+const LABEL = `com.${USER}.workbuddy2api`; // launchd 标签
+const UNIT = 'workbuddy2api'; // systemd 单元名
+const TASK = 'workbuddy2pi'; // Windows 计划任务名
+const PLIST = path.join(HOME, 'Library', 'LaunchAgents', `${LABEL}.plist`);
+const SYSTEMD_UNIT = path.join(HOME, '.config', 'systemd', 'user', `${UNIT}.service`);
+const SERVE_CMD = path.join(DATA_DIR, 'serve.cmd');
+const UV_FALLBACKS = IS_WIN
+  ? [path.join(HOME, '.local', 'bin', 'uv.exe')]
+  : [path.join(HOME, '.local', 'bin', 'uv'), '/usr/local/bin/uv', '/opt/homebrew/bin/uv'];
+
+const ok = (m) => console.log(`\x1b[1;32m✓\x1b[0m ${m}`);
+const info = (m) => console.log(`\x1b[1;36m==>\x1b[0m ${m}`);
+const warn = (m) => console.log(`\x1b[1;33m!\x1b[0m ${m}`);
+const fail = (m) => {
+  console.error(`\x1b[1;31m错误:\x1b[0m ${m}`);
+  process.exit(1);
+};
+
+// ---------------------------------------------------------------- 基础工具
+
+function run(cmd, args, opts = {}) {
+  const result = spawnSync(cmd, args, {
+    encoding: 'utf8',
+    timeout: opts.timeout || 60000,
+    ...opts,
+  });
+  return {
+    status: result.status === null ? -1 : result.status,
+    stdout: (result.stdout || '').trim(),
+    stderr: (result.stderr || '').trim(),
+    error: result.error,
+  };
+}
+
+function readJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function writeFileTight(file, content) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, content, { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
+/** 同步睡眠：launchctl 的 bootout 是异步的，需要等它真的完成。 */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function launchdDomain() {
+  return `gui/${process.getuid()}`;
+}
+
+/**
+ * 卸下 launchd job 并等到标签真的消失。
+ * 紧接着 bootout 就 bootstrap 同一个标签会拿到 "Bootstrap failed: 5: Input/output error"。
+ */
+function launchdBootout() {
+  run('launchctl', ['bootout', `${launchdDomain()}/${LABEL}`]);
+  for (let i = 0; i < 24; i += 1) {
+    if (run('launchctl', ['print', `${launchdDomain()}/${LABEL}`]).status !== 0) return true;
+    sleepSync(250);
+  }
+  return false;
+}
+
+function launchdBootstrap() {
+  let last = '';
+  for (let i = 0; i < 6; i += 1) {
+    const r = run('launchctl', ['bootstrap', launchdDomain(), PLIST]);
+    if (r.status === 0) return true;
+    last = r.stderr || r.stdout;
+    sleepSync(500);
+  }
+  return fail(`launchctl bootstrap 失败：${last}`);
+}
+
+/**
+ * 本仓库 vendored 的反代实现（wheel，由安装脚本部署到 ~/.workbuddy2api/vendor/）。
+ * 用本地 wheel 而不是 `--with workbuddy2api`：反代实现固定在仓库里，不受上游发版影响。
+ */
+function vendoredWheel() {
+  if (!fs.existsSync(VENDOR_DIR)) return null;
+  const wheels = fs
+    .readdirSync(VENDOR_DIR)
+    .filter((n) => /^workbuddy2api-.*\.whl$/.test(n))
+    .sort();
+  return wheels.length ? path.join(VENDOR_DIR, wheels[wheels.length - 1]) : null;
+}
+
+function requireVendoredWheel() {
+  const wheel = vendoredWheel();
+  if (!wheel) {
+    fail(
+      `未找到本地 vendored 依赖：${VENDOR_DIR} 下没有 workbuddy2api-*.whl\n` +
+        '      请先运行本仓库的 workbuddy2pi/install-workbuddy2pi.sh（或 .ps1）完成部署'
+    );
+  }
+  return wheel;
+}
+
+function findUv() {
+  const probe = IS_WIN
+    ? run('where', ['uv'])
+    : run('sh', ['-c', 'command -v uv']);
+  if (probe.status === 0 && probe.stdout) {
+    const first = probe.stdout.split(/\r?\n/).find(Boolean);
+    if (first && fs.existsSync(first.trim())) return first.trim();
+  }
+  for (const candidate of UV_FALLBACKS) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function fmtTime(ms) {
+  if (!ms) return '未知';
+  const d = new Date(Number(ms));
+  const pad = (n) => String(n).padStart(2, '0');
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
+}
+
+function request(method, url, { headers = {}, body = null } = {}, timeout = 30000) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const lib = target.protocol === 'https:' ? https : http;
+    const payload = body === null ? null : Buffer.from(JSON.stringify(body), 'utf8');
+    const req = lib.request(
+      {
+        method,
+        hostname: target.hostname,
+        port: target.port || (target.protocol === 'https:' ? 443 : 80),
+        path: target.pathname + target.search,
+        headers: {
+          ...headers,
+          ...(payload ? { 'Content-Length': payload.length } : {}),
+        },
+        timeout,
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          let json = null;
+          try {
+            json = JSON.parse(text);
+          } catch {
+            /* 非 JSON 响应保留原文交给调用方判断 */
+          }
+          resolve({ status: res.statusCode, text, json });
+        });
+      }
+    );
+    req.on('timeout', () => req.destroy(new Error('请求超时')));
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// ---------------------------------------------------------------- 服务管理
+
+function serviceStatus() {
+  if (IS_MAC) {
+    const r = run('launchctl', ['print', `${launchdDomain()}/${LABEL}`]);
+    if (r.status !== 0) return { registered: false, running: false, detail: '未注册' };
+    const pid = (r.stdout.match(/^\s*pid = (\d+)/m) || [])[1];
+    const state = (r.stdout.match(/^\s*state = (\S+)/m) || [])[1] || 'unknown';
+    return {
+      registered: true,
+      running: state === 'running',
+      detail: `launchd ${LABEL}，state=${state}${pid ? `，pid=${pid}` : ''}`,
+    };
+  }
+  if (IS_LINUX) {
+    const active = run('systemctl', ['--user', 'is-active', UNIT]);
+    const enabled = run('systemctl', ['--user', 'is-enabled', UNIT]);
+    const registered = enabled.status === 0;
+    return {
+      registered,
+      running: active.stdout === 'active',
+      detail: `systemd --user ${UNIT}，is-active=${active.stdout || '未知'}，is-enabled=${enabled.stdout || '未知'}`,
+    };
+  }
+  const q = run('schtasks', ['/Query', '/TN', TASK]);
+  const registered = q.status === 0;
+  return {
+    registered,
+    running: registered, // 计划任务的状态文本随系统语言变化，运行与否以端点健康检查为准
+    detail: registered ? `Windows 计划任务 ${TASK}（登录时启动）` : '未注册',
+  };
+}
+
+function launchdPlist(uv, wheel) {
+  const logFile = path.join(DATA_DIR, 'codebuddy-proxy.jsonl');
+  const stdout = path.join(DATA_DIR, 'proxy-stdout.log');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>${LABEL}</string>
+	<!-- 由 launchd 直接托管前台进程（而不是调用一个会 nohup 到后台的脚本，
+	     那样脚本秒退会让 KeepAlive 变成无限重启循环），
+	     这样 KeepAlive 才能在崩溃后把代理拉回来。 -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>${uv}</string>
+		<string>run</string>
+		<string>--with</string>
+		<string>${wheel}</string>
+		<string>python</string>
+		<string>-m</string>
+		<string>codebuddy_proxy</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>${PORT}</string>
+		<string>--desensitize</string>
+		<string>--log-file</string>
+		<string>${logFile}</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>${HOME}</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>${HOME}</string>
+		<key>PATH</key>
+		<string>${path.join(HOME, '.local', 'bin')}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>15</integer>
+	<key>StandardOutPath</key>
+	<string>${stdout}</string>
+	<key>StandardErrorPath</key>
+	<string>${stdout}</string>
+</dict>
+</plist>
+`;
+}
+
+function systemdUnit(uv, wheel) {
+  const logFile = path.join(DATA_DIR, 'codebuddy-proxy.jsonl');
+  const stdout = path.join(DATA_DIR, 'proxy-stdout.log');
+  return `[Unit]
+Description=WorkBuddy 反代（codebuddy_proxy），把 WorkBuddy 额度转成 OpenAI 兼容端点
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${uv} run --with "${wheel}" python -m codebuddy_proxy --host 127.0.0.1 --port ${PORT} --desensitize --log-file ${logFile}
+WorkingDirectory=${HOME}
+Restart=always
+RestartSec=15
+StandardOutput=append:${stdout}
+StandardError=append:${stdout}
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+function windowsServeCmd(uv, wheel) {
+  const logFile = path.join(DATA_DIR, 'codebuddy-proxy.jsonl');
+  const stdout = path.join(DATA_DIR, 'proxy-stdout.log');
+  // 计划任务不会在崩溃后重启进程，所以用循环做 keep-alive。
+  return `@echo off
+rem 由 workbuddy2pi install-service 生成，请勿手工编辑。
+setlocal
+:loop
+"${uv}" run --with "${wheel}" python -m codebuddy_proxy --host 127.0.0.1 --port ${PORT} --desensitize --log-file "${logFile}" >> "${stdout}" 2>&1
+timeout /t 15 /nobreak >nul
+goto loop
+`;
+}
+
+function installService() {
+  const uv = findUv();
+  if (!uv) fail('未找到 uv，请先运行本仓库的 workbuddy2pi/install-workbuddy2pi.sh（或 .ps1）');
+  const wheel = requireVendoredWheel();
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+
+  if (IS_MAC) {
+    fs.mkdirSync(path.dirname(PLIST), { recursive: true });
+    fs.writeFileSync(PLIST, launchdPlist(uv, wheel));
+    launchdBootout();
+    launchdBootstrap();
+    ok(`已注册 launchd 服务：${PLIST}`);
+    return;
+  }
+  if (IS_LINUX) {
+    fs.mkdirSync(path.dirname(SYSTEMD_UNIT), { recursive: true });
+    fs.writeFileSync(SYSTEMD_UNIT, systemdUnit(uv, wheel));
+    run('systemctl', ['--user', 'daemon-reload']);
+    const r = run('systemctl', ['--user', 'enable', '--now', UNIT]);
+    if (r.status !== 0) fail(`systemctl enable --now 失败：${r.stderr || r.stdout}`);
+    ok(`已注册并启用 systemd 用户服务：${SYSTEMD_UNIT}`);
+    if (run('loginctl', ['show-user', USER, '-p', 'Linger']).stdout.includes('Linger=no')) {
+      warn('未开启 linger，注销登录后服务会停止。可执行：loginctl enable-linger ' + USER);
+    }
+    return;
+  }
+  writeFileTight(SERVE_CMD, windowsServeCmd(uv, wheel));
+  const r = run('schtasks', [
+    '/Create',
+    '/TN', TASK,
+    '/TR', `"${SERVE_CMD}"`,
+    '/SC', 'ONLOGON',
+    '/RL', 'LIMITED',
+    '/F',
+  ]);
+  if (r.status !== 0) fail(`schtasks /Create 失败：${r.stderr || r.stdout}`);
+  run('schtasks', ['/Run', '/TN', TASK]);
+  ok(`已注册计划任务：${TASK}（登录时启动）`);
+}
+
+function uninstallService() {
+  if (IS_MAC) {
+    launchdBootout();
+    if (fs.existsSync(PLIST)) fs.unlinkSync(PLIST);
+    ok('已移除 launchd 服务');
+    return;
+  }
+  if (IS_LINUX) {
+    run('systemctl', ['--user', 'disable', '--now', UNIT]);
+    if (fs.existsSync(SYSTEMD_UNIT)) fs.unlinkSync(SYSTEMD_UNIT);
+    run('systemctl', ['--user', 'daemon-reload']);
+    ok('已移除 systemd 用户服务');
+    return;
+  }
+  run('schtasks', ['/End', '/TN', TASK]);
+  run('schtasks', ['/Delete', '/TN', TASK, '/F']);
+  if (fs.existsSync(SERVE_CMD)) fs.unlinkSync(SERVE_CMD);
+  ok('已移除计划任务');
+}
+
+function startService() {
+  const state = serviceStatus();
+  if (!state.registered) return installService();
+  if (IS_MAC) {
+    const r = run('launchctl', ['kickstart', `${launchdDomain()}/${LABEL}`]);
+    if (r.status !== 0) return installService();
+  } else if (IS_LINUX) {
+    const r = run('systemctl', ['--user', 'start', UNIT]);
+    if (r.status !== 0) fail(`systemctl start 失败：${r.stderr || r.stdout}`);
+  } else {
+    const r = run('schtasks', ['/Run', '/TN', TASK]);
+    if (r.status !== 0) fail(`schtasks /Run 失败：${r.stderr || r.stdout}`);
+  }
+  ok('服务已启动');
+}
+
+function stopService() {
+  if (IS_MAC) {
+    if (!launchdBootout()) warn('launchd job 未能在预期时间内卸下');
+    ok('服务已停止（launchd 中卸载；下次 workbuddy2pi start 会重新加载）');
+    return;
+  }
+  if (IS_LINUX) {
+    const r = run('systemctl', ['--user', 'stop', UNIT]);
+    if (r.status !== 0) fail(`systemctl stop 失败：${r.stderr || r.stdout}`);
+    ok('服务已停止');
+    return;
+  }
+  const r = run('schtasks', ['/End', '/TN', TASK]);
+  if (r.status !== 0) fail(`schtasks /End 失败：${r.stderr || r.stdout}`);
+  ok('服务已停止');
+}
+
+function restartService() {
+  if (IS_MAC) {
+    const r = run('launchctl', ['kickstart', '-k', `gui/${process.getuid()}/${LABEL}`]);
+    if (r.status !== 0) return startService();
+  } else if (IS_LINUX) {
+    const r = run('systemctl', ['--user', 'restart', UNIT]);
+    if (r.status !== 0) fail(`systemctl restart 失败：${r.stderr || r.stdout}`);
+  } else {
+    run('schtasks', ['/End', '/TN', TASK]);
+    run('timeout', ['/t', '1', '/nobreak'], { shell: true });
+    const r = run('schtasks', ['/Run', '/TN', TASK]);
+    if (r.status !== 0) fail(`schtasks /Run 失败：${r.stderr || r.stdout}`);
+  }
+  ok('服务已重启');
+}
+
+async function waitHealthy(seconds = 25) {
+  const deadline = Date.now() + seconds * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const h = await health();
+    if (h.ok) return h;
+  }
+  return { ok: false, note: '超时' };
+}
+
+async function health() {
+  try {
+    const r = await request('GET', `${BASE}/v1/models`, {}, 5000);
+    if (r.status !== 200) return { ok: false, note: `HTTP ${r.status}` };
+    if (!r.json || !Array.isArray(r.json.models)) {
+      return { ok: false, note: '响应结构不是预期的模型列表' };
+    }
+    return { ok: true, models: r.json.models.length };
+  } catch (e) {
+    return { ok: false, note: e.code || e.message || String(e) };
+  }
+}
+
+// ---------------------------------------------------------------- 账号 slot
+
+function listSlots() {
+  if (!fs.existsSync(SLOTS_DIR)) return [];
+  return fs
+    .readdirSync(SLOTS_DIR)
+    .filter((n) => n.endsWith('.json') && !n.includes('original'))
+    .map((n) => {
+      const file = path.join(SLOTS_DIR, n);
+      const data = readJson(file);
+      return {
+        key: path.basename(n, '.json'),
+        file,
+        mtime: fs.statSync(file).mtimeMs,
+        data,
+        account: (data && data.account) || {},
+        auth: (data && data.auth) || {},
+      };
+    })
+    .sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/** 当前生效的 slot：由生效文件里的 account.uid 反查，不依赖任何标记文件。 */
+function activeKey() {
+  const live = readJson(LIVE);
+  if (!live) return null;
+  const uid = (live.account || {}).uid;
+  if (!uid) return null;
+  const hit = listSlots().find((s) => (s.account || {}).uid === uid);
+  return hit ? hit.key : null;
+}
+
+function describe(slot) {
+  const name = slot.account.nickname || slot.account.uid || '<未知>';
+  return `${slot.key}: ${name}（uid ${slot.account.uid || '?'}） | access_token 到期 ${fmtTime(
+    slot.auth.expiresAt
+  )} | refresh_token 到期 ${fmtTime(slot.auth.refreshExpiresAt)}`;
+}
+
+/**
+ * 把生效文件归位到它所属的 slot。
+ * 历史版本曾用符号链接指向 slot，这里一并迁移成普通文件，避免写入落进别的 slot。
+ */
+function normalizeLive() {
+  fs.mkdirSync(SLOTS_DIR, { recursive: true });
+  let isLink = false;
+  try {
+    isLink = fs.lstatSync(LIVE).isSymbolicLink();
+  } catch {
+    isLink = false;
+  }
+  if (!isLink) return;
+  const content = fs.readFileSync(LIVE, 'utf8');
+  fs.unlinkSync(LIVE);
+  fs.writeFileSync(LIVE, content, { mode: 0o600 });
+  info('已把生效文件从符号链接迁移为普通文件（跨平台一致的复制式切换）');
+}
+
+function saveLiveToItsSlot() {
+  const live = readJson(LIVE);
+  if (!live) return null;
+  const uid = (live.account || {}).uid;
+  const hit = listSlots().find((s) => (s.account || {}).uid === uid);
+  if (!hit) return null;
+  fs.writeFileSync(hit.file, JSON.stringify(live, null, 2) + '\n', { mode: 0o600 });
+  return hit.key;
+}
+
+function writeSlot(key, data) {
+  writeFileTight(path.join(SLOTS_DIR, `${key}.json`), JSON.stringify(data, null, 2) + '\n');
+}
+
+async function switchTo(key) {
+  normalizeLive();
+  const slot = listSlots().find((s) => s.key === key);
+  if (!slot) {
+    fail(`slot 不存在：${key}（可用：${listSlots().map((s) => s.key).join(', ') || '无'}）`);
+  }
+  const current = activeKey();
+  if (current === key) {
+    ok(`当前已经是账号 ${key}`);
+    console.log('  ' + describe(slot));
+    return;
+  }
+  const saved = saveLiveToItsSlot();
+  if (saved) info(`已把当前账号 ${saved} 的最新凭证存回其 slot`);
+
+  writeFileTight(LIVE, JSON.stringify(readJson(slot.file), null, 2) + '\n');
+  info(`已切换到账号 ${key}，正在重启服务…`);
+  restartService();
+
+  const h = await waitHealthy();
+  if (!h.ok) {
+    if (saved) {
+      warn(`切换后端点不健康（${h.note}），正在回滚到账号 ${saved}`);
+      writeFileTight(LIVE, JSON.stringify(readJson(path.join(SLOTS_DIR, `${saved}.json`)), null, 2) + '\n');
+      restartService();
+      const back = await waitHealthy();
+      back.ok ? warn(`已回滚，端点恢复（${back.models} 个模型）`) : warn('回滚后端点仍不健康，请查看 workbuddy2pi logs');
+    }
+    process.exit(1);
+  }
+  ok(`切换完成，端点正常（${h.models} 个模型）`);
+  console.log('  ' + describe(slot));
+}
+
+const REFRESH_HEADERS = (account) => {
+  const h = {
+    'X-Product-Code': 'codebuddy',
+    'X-IDE-Type': 'vscode',
+    'X-IDE-Name': 'Visual Studio Code',
+    'X-IDE-Version': '1.70.2',
+    'X-Product-Version': '4.10.33259736',
+    'X-Auth-Refresh-Source': 'plugin',
+    'Content-Type': 'application/json',
+  };
+  if (account.uid) h['X-User-Id'] = String(account.uid);
+  if (account.enterpriseId) {
+    h['X-Enterprise-Id'] = String(account.enterpriseId);
+    h['X-Tenant-Id'] = String(account.enterpriseId);
+  }
+  if (account.departmentInfo) h['X-Department-Info'] = String(account.departmentInfo);
+  return h;
+};
+
+async function renewSlot(key) {
+  const slot = listSlots().find((s) => s.key === key);
+  if (!slot) fail(`slot 不存在：${key}`);
+  const data = readJson(slot.file);
+  const auth = data.auth || {};
+  const account = data.account || {};
+  info(`续期 slot ${key}（${account.nickname || account.uid}）…`);
+
+  const headers = { ...REFRESH_HEADERS(account), 'X-Refresh-Token': String(auth.refreshToken || '') };
+  if (auth.domain) headers['X-Domain'] = String(auth.domain);
+  if (data.machineId) headers['X-Machine-Id'] = String(data.machineId);
+
+  let fresh = null;
+  try {
+    const r = await request('POST', `${ENDPOINT}/v2/plugin/auth/token/refresh`, { headers, body: {} });
+    let payload = r.json;
+    if (payload && payload.data && typeof payload.data === 'object') {
+      payload = payload.data;
+      if (payload.data && typeof payload.data === 'object') payload = payload.data;
+    }
+    if (payload && payload.accessToken) fresh = payload;
+    else warn(`续期响应不含 accessToken：HTTP ${r.status} ${r.text.slice(0, 200)}`);
+  } catch (e) {
+    warn(`续期请求失败：${e.message}`);
+  }
+
+  if (!fresh) {
+    warn('改用 wb-switch 账号库中的凭证（将与该账号在 wb-switch 里的副本共用同一 refresh_token）');
+    const lib = readJson(ACCOUNTS_LIB);
+    const entry = Array.isArray(lib) ? lib.find((a) => a.uid === account.uid) : null;
+    if (!entry) fail('账号库中没有该账号，无法续期。请执行服务端的浏览器登录重新建档（--login）');
+    fresh = {
+      accessToken: entry.access_token,
+      refreshToken: entry.refresh_token,
+      expiresAt: entry.expiresAt,
+      refreshExpiresAt: entry.refreshExpiresAt,
+      tokenType: entry.token_type || 'Bearer',
+      domain: entry.domain || auth.domain,
+    };
+    const raw = entry.auth_raw || {};
+    for (const k of ['expiresIn', 'refreshExpiresIn', 'scope', 'sessionState', 'notBeforePolicy']) {
+      if (raw[k] !== undefined) fresh[k] = raw[k];
+    }
+  }
+
+  // 服务端刷新响应只给相对的 expiresIn/refreshExpiresIn，而反代依赖绝对的 expiresAt
+  // 判断是否需要刷新；缺了 expiresAt 它会把“无到期时间”当成永不过期，此后再不刷新。
+  const nowMs = Date.now();
+  if (fresh.expiresAt == null) {
+    const seconds = Number(fresh.expiresIn || 0);
+    if (!seconds) fail('续期结果里既没有 expiresAt 也没有 expiresIn，无法确定有效期');
+    fresh.expiresAt = nowMs + seconds * 1000;
+  }
+  if (fresh.refreshExpiresAt == null && Number(fresh.refreshExpiresIn || 0)) {
+    fresh.refreshExpiresAt = nowMs + Number(fresh.refreshExpiresIn) * 1000;
+  }
+  fresh.lastRefreshTime = nowMs;
+
+  data.auth = fresh;
+  writeSlot(key, data);
+  ok(`已写入 ${slot.file}`);
+
+  if (activeKey() === key) {
+    writeFileTight(LIVE, JSON.stringify(data, null, 2) + '\n');
+    info('这是当前生效的账号，正在重启服务…');
+    restartService();
+    const h = await waitHealthy();
+    h.ok ? ok(`服务已恢复（${h.models} 个模型）`) : fail(`重启后端点不健康：${h.note}，请查看 workbuddy2pi logs`);
+  }
+  console.log('  ' + describe(listSlots().find((s) => s.key === key)));
+}
+
+// ---------------------------------------------------------------- 凭证导入
+
+/**
+ * 复刻反代的 machineId 生成方式（uuid5(DNS, "<hostname>-<user>")）。
+ * 必须显式写入 session：由 launchd / systemd / 计划任务启动时环境里不一定有 USER，
+ * 而反代在 session 里没有 machineId 时会用 "unknown" 兜底算出一个不同的值。
+ */
+function computeMachineId() {
+  const sha1 = crypto.createHash('sha1');
+  const ns = Buffer.from('6ba7b8109dad11d180b400c04fd430c8', 'hex'); // DNS 命名空间
+  sha1.update(Buffer.concat([ns, Buffer.from(`${os.hostname()}-${USER}`, 'utf8')]));
+  const bytes = sha1.digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function currentMachineId() {
+  const fromLive = readJson(LIVE);
+  if (fromLive && fromLive.machineId) return fromLive.machineId;
+  const fromSlot = listSlots().find((s) => s.data && s.data.machineId);
+  return fromSlot ? fromSlot.data.machineId : computeMachineId();
+}
+
+/** 有界搜索 WorkBuddy 桌面端落盘的登录文件。 */
+function findDesktopInfo() {
+  const named = [
+    path.join(HOME, 'Library', 'Application Support', 'CodeBuddyExtension', 'Data', 'Public', 'auth',
+      'workbuddy-desktop.info'),
+    path.join(HOME, 'Library', 'Application Support', 'CodeBuddyExtension', 'Data', 'Public', 'auth',
+      'workbuddy-desktop-ai.info'),
+  ];
+  for (const p of named) if (fs.existsSync(p)) return p;
+
+  const roots = [];
+  if (IS_WIN) {
+    if (process.env.APPDATA) roots.push(process.env.APPDATA);
+    if (process.env.LOCALAPPDATA) roots.push(process.env.LOCALAPPDATA);
+  } else if (IS_LINUX) {
+    roots.push(path.join(HOME, '.config'));
+    roots.push(path.join(HOME, '.local', 'share'));
+  }
+
+  const SKIP = new Set(['node_modules', 'Cache', 'CachedData', 'GPUCache', 'logs', '.git']);
+  const findIn = (dir, depth) => {
+    if (depth > 5) return null;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    for (const e of entries) {
+      if (e.isFile() && /^workbuddy-desktop.*\.info$/.test(e.name)) return path.join(dir, e.name);
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || SKIP.has(e.name) || e.name.startsWith('.')) continue;
+      const hit = findIn(path.join(dir, e.name), depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue;
+    const hit = findIn(root, 0);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function nextSlotKey(taken) {
+  for (let i = 0; i < 26; i += 1) {
+    const key = String.fromCharCode(97 + i);
+    if (!taken.has(key)) return key;
+  }
+  let n = 2;
+  while (taken.has(`account-${n}`)) n += 1;
+  return `account-${n}`;
+}
+
+/**
+ * 把 WorkBuddy 桌面端的登录文件转成反代能用的 session。
+ * 服务端/桌面端的 auth 对象只有相对的 expiresIn，而反代依赖绝对的 expiresAt
+ * 判断是否需要刷新；这里统一补算，避免踩到“expiresAt 缺失后再不刷新”的坑。
+ */
+function importSession(file) {
+  const src = file || findDesktopInfo();
+  if (!src) {
+    fail('未找到 WorkBuddy 桌面端登录文件。请在 WorkBuddy 里登录一次，或用 --login 走浏览器登录建档');
+  }
+  if (!fs.existsSync(src)) fail(`文件不存在：${src}`);
+  const info = readJson(src);
+  if (!info) fail(`无法解析为 JSON：${src}`);
+  const auth = info.auth || {};
+  if (!auth.accessToken || !auth.refreshToken) {
+    fail(`${src} 里没有 accessToken/refreshToken，请先在 WorkBuddy 桌面端登录`);
+  }
+  const account = info.account || {};
+  const nowMs = Date.now();
+  const nextAuth = { ...auth };
+  if (nextAuth.expiresAt == null) {
+    const seconds = Number(nextAuth.expiresIn || 0);
+    if (!seconds) fail('来源里既没有 expiresAt 也没有 expiresIn，无法确定有效期');
+    nextAuth.expiresAt = nowMs + seconds * 1000;
+  }
+  if (nextAuth.refreshExpiresAt == null && Number(nextAuth.refreshExpiresIn || 0)) {
+    nextAuth.refreshExpiresAt = nowMs + Number(nextAuth.refreshExpiresIn) * 1000;
+  }
+  if (nextAuth.lastRefreshTime == null) nextAuth.lastRefreshTime = nowMs;
+
+  const slots = listSlots();
+  const existing = slots.find((s) => (s.account || {}).uid === account.uid);
+  const key = existing ? existing.key : nextSlotKey(new Set(slots.map((s) => s.key)));
+  const session = { auth: nextAuth, account, machineId: currentMachineId() };
+  writeSlot(key, session);
+  ok(`已写入 slot ${key}：${account.nickname || account.uid || '<未知>'}（来源 ${src}）`);
+
+  const live = readJson(LIVE);
+  const liveValid = !!(live && live.auth && live.auth.accessToken &&
+    Number(live.auth.expiresAt || 0) > Date.now());
+  if (!liveValid) {
+    writeFileTight(LIVE, JSON.stringify(session, null, 2) + '\n');
+    ok(`已设为当前生效账号（${LIVE}）`);
+  } else {
+    info('生效文件已有效，未改动；需要切换请执行 workbuddy2pi account ' + key);
+  }
+}
+
+// ---------------------------------------------------------------- 安装期辅助
+
+/** 供安装脚本调用：生效凭证是否存在且未过期。仅靠退出码表达结果，不输出。 */
+function checkSession() {
+  const live = readJson(LIVE);
+  const auth = (live && live.auth) || {};
+  const good = !!(auth.accessToken && Number(auth.expiresAt || 0) > Date.now());
+  process.exit(good ? 0 : 1);
+}
+
+/** 供安装脚本调用：保证 auth.json 里有 workbuddy 占位 key（本地反代不校验 key）。 */
+function ensureAuthKey() {
+  fs.mkdirSync(path.dirname(AUTH_JSON), { recursive: true });
+  let data = {};
+  let existed = false;
+  try {
+    data = JSON.parse(fs.readFileSync(AUTH_JSON, 'utf8'));
+    existed = true;
+  } catch {
+    /* 文件不存在或不是 JSON，按新建处理 */
+  }
+  if (data.workbuddy) {
+    console.log('present');
+    return;
+  }
+  if (existed) fs.copyFileSync(AUTH_JSON, `${AUTH_JSON}.bak`);
+  data.workbuddy = { type: 'api_key', key: 'workbuddy-local' };
+  fs.writeFileSync(AUTH_JSON, JSON.stringify(data, null, 2) + '\n');
+  console.log('added');
+}
+
+// ---------------------------------------------------------------- 命令
+
+async function cmdStatus() {
+  const state = serviceStatus();
+  const h = await health();
+  const key = activeKey();
+
+  console.log('WorkBuddy 反代状态');
+  console.log(`  服务      : ${state.registered ? state.detail : '未注册（运行 workbuddy2pi install-service）'}`);
+  console.log(
+    `  端点      : ${BASE}  ${h.ok ? `\x1b[1;32m✓ 正常，${h.models} 个模型\x1b[0m` : `\x1b[1;31m✗ ${h.note}\x1b[0m`}`
+  );
+
+  if (key) {
+    const slot = listSlots().find((s) => s.key === key);
+    console.log(`  当前账号  : ${describe(slot)}`);
+    const expiresAt = Number(slot.auth.expiresAt || 0);
+    if (expiresAt) {
+      const days = (expiresAt - Date.now()) / 86400000;
+      if (days < 0) warn('access_token 已过期，请执行 workbuddy2pi account renew');
+      else if (days < 3) warn(`access_token 将在 ${days.toFixed(1)} 天后过期，建议提前 renew`);
+    }
+  } else {
+    console.log('  当前账号  : 无法判定（生效文件缺失或不在任何 slot 中）');
+  }
+
+  const slots = listSlots();
+  console.log(`  可用账号  : ${slots.length ? '' : '无'}`);
+  for (const s of slots) console.log(`    ${s.key === key ? '*' : ' '} ${describe(s)}`);
+
+  const logFile = path.join(DATA_DIR, 'proxy.log');
+  if (fs.existsSync(logFile)) {
+    const mb = (fs.statSync(logFile).size / 1048576).toFixed(1);
+    console.log(`  日志      : ${logFile}（${mb} MB）`);
+  } else {
+    console.log('  日志      : 尚未生成');
+  }
+}
+
+function cmdLogs(lines) {
+  const logFile = path.join(DATA_DIR, 'proxy.log');
+  if (!fs.existsSync(logFile)) fail(`日志文件不存在：${logFile}`);
+  const all = fs.readFileSync(logFile, 'utf8').split('\n');
+  process.stdout.write(all.slice(-(lines + 1)).join('\n'));
+}
+
+async function cmdDoctor() {
+  let bad = 0;
+  const mark = (good, text, hint) => {
+    if (good) ok(text);
+    else {
+      bad += 1;
+      warn(`${text}${hint ? `　→ ${hint}` : ''}`);
+    }
+  };
+
+  mark(true, `Node.js ${process.version}`);
+  const uv = findUv();
+  mark(!!uv, `uv：${uv || '未找到'}`, '运行 workbuddy2pi/install-workbuddy2pi.sh 安装');
+  const wheel = vendoredWheel();
+  mark(
+    !!wheel,
+    `vendored 反代依赖：${wheel ? path.basename(wheel) : '未找到'}`,
+    '运行 workbuddy2pi/install-workbuddy2pi.sh 部署'
+  );
+  mark(fs.existsSync(LIVE), `生效凭证文件：${LIVE}`, '先完成登录建档');
+  const live = readJson(LIVE);
+  mark(!!(live && live.auth && live.auth.accessToken), '生效凭证含 accessToken');
+  mark(!!(live && live.auth && live.auth.expiresAt), '生效凭证含 expiresAt（缺失会导致反代不再主动刷新）');
+  mark(
+    !!activeKey(),
+    `生效凭证归属 slot：${activeKey() || '未匹配'}`,
+    '用 workbuddy2pi account 查看可用 slot'
+  );
+  mark(fs.existsSync(EXTENSION), `pi 扩展：${EXTENSION}`, '运行安装脚本');
+  const auth = readJson(AUTH_JSON) || {};
+  mark(!!auth.workbuddy, 'auth.json 中存在 workbuddy 占位 key', '运行安装脚本');
+
+  const state = serviceStatus();
+  mark(state.registered, `常驻服务：${state.detail}`, '运行 workbuddy2pi install-service');
+  const h = await health();
+  mark(h.ok, `端点：${h.ok ? `${h.models} 个模型` : h.note}`, '查看 workbuddy2pi logs');
+
+  if (run('sh', ['-c', 'command -v pi']).status === 0 || !IS_WIN) {
+    const listed = run('pi', ['--list-models'], { timeout: 120000 });
+    const count = listed.stdout.split('\n').filter((l) => l.startsWith('workbuddy ')).length;
+    mark(count > 0, `pi 可见 workbuddy 模型：${count} 个`, '确认扩展已加载，并重开 pi');
+  }
+
+  console.log('');
+  bad === 0 ? ok('自检全部通过') : warn(`自检有 ${bad} 项未通过`);
+  if (bad > 0) process.exit(1);
+}
+
+function usage() {
+  console.log(`workbuddy2pi — WorkBuddy 反代运维命令
+
+用法：
+  workbuddy2pi status                 查看服务、端点、凭证与账号
+  workbuddy2pi start|stop|restart     控制常驻服务
+  workbuddy2pi logs [行数]            查看反代日志尾部（默认 40 行）
+  workbuddy2pi account                列出账号 slot
+  workbuddy2pi account <key>          切换到指定账号
+  workbuddy2pi account renew [key]    续期凭证（默认当前账号）
+  workbuddy2pi install-service        注册并启动常驻服务
+  workbuddy2pi uninstall-service      移除常驻服务
+  workbuddy2pi import-session [文件]  从 WorkBuddy 桌面端登录文件建档（不给路径则自动查找）
+  workbuddy2pi doctor                 依赖与接入自检（失败时退出码非零）
+
+供安装脚本调用（不宜手敲）：
+  workbuddy2pi check-session          生效凭证有效则退出码 0，否则 1
+  workbuddy2pi ensure-auth-key        保证 auth.json 里有 workbuddy 占位 key
+
+平台：macOS 用 launchd，Linux 用 systemd --user，Windows 用登录触发的计划任务。
+端口固定 ${PORT}，与 pi 扩展里的 baseUrl 保持一致。`);
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const cmd = (argv[0] || 'status').toLowerCase();
+
+  switch (cmd) {
+    case 'status':
+      return cmdStatus();
+    case 'start':
+      return startService();
+    case 'stop':
+      return stopService();
+    case 'restart':
+      return restartService();
+    case 'logs':
+      return cmdLogs(Number(argv[1]) > 0 ? Number(argv[1]) : 40);
+    case 'install-service':
+      return installService();
+    case 'uninstall-service':
+      return uninstallService();
+    case 'doctor':
+      return cmdDoctor();
+    case 'import-session':
+      return importSession(argv[1]);
+    case 'check-session':
+      return checkSession();
+    case 'ensure-auth-key':
+      return ensureAuthKey();
+    case 'account': {
+      const sub = argv[1];
+      if (!sub) {
+        const key = activeKey();
+        const slots = listSlots();
+        if (!slots.length) fail(`没有任何账号 slot，目录：${SLOTS_DIR}`);
+        console.log('可用账号：');
+        for (const s of slots) console.log(`  ${s.key === key ? '*' : ' '} ${describe(s)}`);
+        return;
+      }
+      if (sub.toLowerCase() === 'renew') {
+        const key = argv[2] || activeKey();
+        if (!key) fail('无法判定当前账号，请显式指定要续期的 key');
+        return renewSlot(key);
+      }
+      return switchTo(sub);
+    }
+    case '-h':
+    case '--help':
+    case 'help':
+      return usage();
+    default:
+      usage();
+      fail(`未知子命令：${cmd}`);
+  }
+}
+
+main().catch((e) => fail(e && e.stack ? e.stack : String(e)));
