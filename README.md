@@ -22,7 +22,7 @@ qodbuddy2pi/
 │       ├── workbuddy2api-2.0.4-py3-none-any.whl
 │       ├── workbuddy2api-LICENSE
 │       ├── pi-provider-qoder/          qoder provider 扩展
-│       └── pi-provider-qoder-0.4.5.tgz
+│       └── pi-provider-qoder-0.4.6.tgz
 └── README.md
 ```
 
@@ -79,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File workbuddy2pi\install-workbuddy2pi.ps1
 | 依赖 | 来源 | 是否在本仓库 |
 |---|---|---|
 | `workbuddy2api` 2.0.4（反代实现） | PyPI | ✅ `assets/vendor/workbuddy2api-*.whl` |
-| `pi-provider-qoder` 0.4.5（qoder 扩展） | npm | ✅ `assets/vendor/pi-provider-qoder/` |
+| `pi-provider-qoder` 0.4.6（qoder 扩展） | npm | ✅ `assets/vendor/pi-provider-qoder/` |
 | `workbuddy.ts`（pi provider 扩展） | — | ✅ `assets/workbuddy.ts` |
 | Node.js | brew / winget / nodejs.org | ❌ 二进制运行时 |
 | pi 本体 | npm registry | ❌ 宿主程序 |

@@ -42,6 +42,8 @@ powershell -ExecutionPolicy Bypass -File install-pi-qoder.ps1 pt-xxxxxx -Region 
 
 扩展从**本仓库自带的副本**安装（`../assets/vendor/pi-provider-qoder`），不再从 npm 拉取，因此不受上游发版或下架影响。该副本的版本、校验值与许可见 [../assets/vendor/README.md](../assets/vendor/README.md)。
 
+> 版本说明：0.4.6 修复了与 pi ≥ 0.86 的上下文兼容问题——旧版读不到折叠进首条 system 消息的系统提示词与工具声明，导致请求丢失上下文、模型表现为“没有工具/不能联网”。请确保副本不低于该版本。
+
 ## 登录未生效怎么办
 
 运行 `pi`，输入 `/login qoder-cn`（国内版）或 `/login qoder`（国际版）完成登录，再重跑脚本验证。

@@ -1328,6 +1328,17 @@ function stripThinkingTags(text) {
   }
   return out;
 }
+var DSML_TAG = /<\/?[\uFF5C|]{0,2}\s*DSML\s*[\uFF5C|]{0,2}[^>]*>|<\/?(?:invoke|invocation|parameter|function_call|function_calls)\b[^>]*>/g;
+var DEGENERATE_DSML_TAIL = /(?:(?:<\/?(?:invoke|invocation|parameter|function_call|function_calls)\b[^>]*>)\s*|(?:<\/?[\uFF5C|]{0,2}\s*DSML\s*[\uFF5C|]{0,2}[^>]*>)\s*){2,}$/;
+function stripDsmlResidue(text) {
+  return text.replace(DSML_TAG, "").replace(/\n{3,}/g, "\n\n");
+}
+function isDegenerateDsmlTurn(message, rawReasoning) {
+  if (message.stopReason === "toolUse") return false;
+  const content = Array.isArray(message.content) ? message.content : [];
+  if (content.some((block) => block.type === "text" && block.text.trim().length > 0)) return false;
+  return DEGENERATE_DSML_TAIL.test(rawReasoning);
+}
 var ThinkingTagParser = class {
   constructor(output, stream) {
     this.output = output;
@@ -1569,15 +1580,14 @@ function transformMessagesForQoder(messages) {
     } else if (msg.role === "assistant") {
       const am = msg;
       let content = "";
+      let reasoningContent = "";
       const toolCalls = [];
       if (Array.isArray(am.content)) {
         for (const block of am.content) {
           if (block.type === "text") {
             content += block.text;
           } else if (block.type === "thinking") {
-            content += `<thinking>${block.thinking}</thinking>
-
-`;
+            reasoningContent += stripDsmlResidue(block.thinking);
           } else if (block.type === "toolCall") {
             const tc = block;
             toolCalls.push({
@@ -1595,8 +1605,11 @@ function transformMessagesForQoder(messages) {
       }
       const mapped = {
         role: "assistant",
-        content: content || (toolCalls.length > 0 ? " " : null)
+        content: content || (toolCalls.length > 0 || reasoningContent ? " " : null)
       };
+      if (reasoningContent) {
+        mapped.reasoning_content = reasoningContent;
+      }
       if (toolCalls.length > 0) {
         mapped.tool_calls = toolCalls;
       }
@@ -1675,6 +1688,32 @@ function contentToText(content) {
   }
   return "";
 }
+function resolveRequestContext(piAi, context) {
+  const {
+    collapseSystemMessages,
+    getCurrentTools,
+    getInitialSystemMessage,
+    getSystemMessageText,
+    withoutInitialSystemMessage
+  } = piAi;
+  const hasTranscript = typeof collapseSystemMessages === "function" && typeof getCurrentTools === "function" && typeof getInitialSystemMessage === "function" && typeof getSystemMessageText === "function" && typeof withoutInitialSystemMessage === "function";
+  if (!hasTranscript) {
+    return {
+      messages: context.messages,
+      systemText: contentToText(context.systemPrompt || ""),
+      tools: context.tools ?? []
+    };
+  }
+  const collapsed = collapseSystemMessages(context);
+  const transcriptMessages = collapsed.messages;
+  const initialSystem = getInitialSystemMessage(transcriptMessages);
+  const tools = getCurrentTools(transcriptMessages);
+  const systemText = contentToText(
+    initialSystem && getSystemMessageText ? getSystemMessageText(initialSystem) : context.systemPrompt || ""
+  );
+  const messages = withoutInitialSystemMessage(transcriptMessages);
+  return { messages, systemText, tools };
+}
 function streamQoder(model, context, options) {
   const StreamCtor = PiAi.AssistantMessageEventStream;
   const stream = new StreamCtor();
@@ -1716,8 +1755,9 @@ function streamQoder(model, context, options) {
       }
       const qoderModel = modelConfig.key;
       const isReasoning = !!modelConfig.is_reasoning;
-      const normalizedMessages = transformMessagesForQoder(context.messages);
-      const systemText = contentToText(context.systemPrompt || "");
+      const resolved = resolveRequestContext(PiAi, context);
+      const normalizedMessages = transformMessagesForQoder(resolved.messages);
+      const systemText = resolved.systemText;
       let lastUserText = "";
       for (let i = normalizedMessages.length - 1; i >= 0; i--) {
         if (normalizedMessages[i].role === "user") {
@@ -1732,7 +1772,7 @@ function streamQoder(model, context, options) {
       if (options?.maxTokens && options.maxTokens < maxTokens) {
         maxTokens = options.maxTokens;
       }
-      const toolsRaw = context.tools && context.tools.length > 0 ? transformTools(context.tools) : void 0;
+      const toolsRaw = resolved.tools.length > 0 ? transformTools(resolved.tools) : void 0;
       const recordID = stableChatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens);
       const requestedLevel = options?.reasoning;
       const clamped = requestedLevel ? clampThinkingLevel(model, requestedLevel) : void 0;
@@ -1834,6 +1874,7 @@ function streamQoder(model, context, options) {
       let bufferStart = 0;
       let contentBlockIndex = -1;
       let thinkingBlockIndex = -1;
+      let rawReasoningTail = "";
       const toolCallsState = [];
       const thinkingEnabled = options?.reasoning !== false && options?.reasoning !== "off";
       const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
@@ -1888,7 +1929,8 @@ function streamQoder(model, context, options) {
               const delta = choice.delta;
               if (delta) {
                 if (delta.reasoning_content) {
-                  const reasoningChunk = stripThinkingTags(delta.reasoning_content);
+                  rawReasoningTail = (rawReasoningTail + delta.reasoning_content).slice(-512);
+                  const reasoningChunk = stripDsmlResidue(stripThinkingTags(delta.reasoning_content));
                   if (reasoningChunk) {
                     if (thinkingBlockIndex === -1) {
                       thinkingBlockIndex = output.content.length;
@@ -2026,6 +2068,13 @@ function streamQoder(model, context, options) {
       }
       if (toolCallsState.some((state) => state?.emittedStart)) {
         output.stopReason = "toolUse";
+      }
+      if (isDegenerateDsmlTurn(output, rawReasoningTail)) {
+        output.stopReason = "error";
+        output.errorMessage = "Qoder server error: degenerate model output (unparseable DSML tool-call markup, no tool call executed)";
+        stream.push({ type: "error", reason: "error", error: output });
+        stream.end();
+        return;
       }
       stream.push({
         type: "done",

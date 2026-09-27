@@ -2,16 +2,16 @@
 
 这里存放原本要从远端仓库/包仓库拉取的两份第三方制品，让安装脚本不再依赖上游的发版节奏、可用性或内容变更。**仓库是这些文件的唯一来源**，安装脚本只把它们复制到本机，不会再去远端取。
 
-拉取时间：2026-09-17
+拉取时间：2026-09-27（本次更新仅 pi-provider-qoder；workbuddy2api 未变动）
 
 | 文件 | 版本 | 来源 | 许可 | SHA-256 |
 |---|---|---|---|---|
 | `workbuddy2api-2.0.4-py3-none-any.whl` | 2.0.4 | PyPI 包 `workbuddy2api` | MIT，见 `workbuddy2api-LICENSE` | `8e6d5028da88978fc536eb03b62aede8d9619f89736ca9dd4f324df954173a35` |
 | `workbuddy2api-LICENSE` | — | 从 wheel 内 `workbuddy2api-2.0.4.dist-info/licenses/LICENSE` 导出 | MIT © 2026 Mayer | — |
-| `pi-provider-qoder/` | 0.4.5 | npm 包 `pi-provider-qoder` 解包（`dist/` + `package.json` + `README.md`） | MIT | 见下方 tarball |
-| `pi-provider-qoder-0.4.5.tgz` | 0.4.5 | npm 原始 tarball，仅用于完整性复核 | MIT | `1f27a25c4f248471ecbfda3fc857faf6f833f23eaf2c6a9c72ae7578c90e7f6a` |
+| `pi-provider-qoder/` | 0.4.6 | npm 包 `pi-provider-qoder` 解包（`dist/` + `package.json` + `README.md`） | MIT | 见下方 tarball |
+| `pi-provider-qoder-0.4.6.tgz` | 0.4.6 | npm 原始 tarball，仅用于完整性复核 | MIT | `d693b7e94bf26037f25f13ae4454d310d2aec10326c240a1e7d07405c456874c` |
 
-npm 原始 integrity（sha512）：`hGSkoUX1XqSIHqPKaJvxlNDOHXcfP7DwlsmOjL32mltQUpHaeaM73q8BwCrrmAjuPz1dusxiPX6CceYRs79SWQ==`
+npm 原始 integrity（sha512）：`6VqeCBhTRNQBeNLOAvl0qmePTpsMImcF4K03rHFV3G/W/Nw9IIB6+RDimlqeSsi1R7aJn0gFEzcn+P2WV5koiw==`
 
 两个包的上游仓库分别是 PyPI 上的 `workbuddy2api`（版权人 Mayer）与 `github.com/simonsmh/pi-provider-qoder`。注意：前者**不是** GitHub 上的 `Tom6814/WorkBuddy2API`——那个仓库是同名的另一套实现，本仓库没有使用它。
 
