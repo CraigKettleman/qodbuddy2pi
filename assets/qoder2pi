@@ -1,0 +1,454 @@
+#!/usr/bin/env node
+/**
+ * qoder2pi — Qoder 接入 pi 的运维命令。
+ *
+ * 与 WorkBuddy 那边不同，Qoder 没有本机反代服务：一切都由 pi 扩展
+ * pi-provider-qoder 负责，登录凭证直接落在 pi 自己的 ~/.pi/agent/auth.json。
+ * 所以这里管的是「两个区域各自的登录状态、扩展、模型」，没有端口、没有服务、
+ * 也没有账号切换——国内版与国际版是并存的，不需要二选一。
+ *
+ * 界面本体是 ./tui.js（与 workbuddy2pi、安装向导共用同一套）。
+ */
+
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const readline = require('readline');
+const { spawnSync } = require('child_process');
+const { createTui, C, G, findCmd } = require('./tui');
+
+const HOME = os.homedir();
+const PI_DIR = path.join(HOME, '.pi', 'agent');
+const AUTH_JSON = path.join(PI_DIR, 'auth.json');
+const CONFIG = path.join(HOME, '.qoder2pi', 'config.json');
+
+/**
+ * 两个区域是两份独立登录态，对应 pi 里两个 provider。PAT 走不同的环境变量，
+ * 扩展收到后会自动兑换 token 并写进 auth.json。
+ */
+const REGIONS = {
+  cn: {
+    key: 'cn',
+    title: '国内版',
+    provider: 'qoder-cn',
+    patEnv: 'QODERCN_API_KEY',
+    patPage: 'https://qoder.com.cn/account/integrations',
+  },
+  global: {
+    key: 'global',
+    title: '国际版',
+    provider: 'qoder',
+    patEnv: 'QODER_API_KEY',
+    patPage: 'https://qoder.com/account/integrations',
+  },
+};
+
+/** 用户可能按 provider 名来指代区域，两种写法都认。 */
+const REGION_ALIASES = {
+  cn: 'cn',
+  'qoder-cn': 'cn',
+  global: 'global',
+  qoder: 'global',
+};
+
+const ok = (m) => console.log(`\x1b[1;32m✓\x1b[0m ${m}`);
+const info = (m) => console.log(`\x1b[1;36m==>\x1b[0m ${m}`);
+const warn = (m) => console.log(`\x1b[1;33m!\x1b[0m ${m}`);
+const fail = (m) => {
+  console.error(`\x1b[1;31m错误:\x1b[0m ${m}`);
+  process.exit(1);
+};
+
+// ---------------------------------------------------------------- 基础工具
+
+function run(cmd, args, opts = {}) {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: opts.timeout || 60000, ...opts });
+  return {
+    status: r.status === null ? -1 : r.status,
+    stdout: (r.stdout || '').trim(),
+    stderr: (r.stderr || '').trim(),
+    error: r.error,
+  };
+}
+
+function readJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function fmtTime(ms) {
+  if (!ms) return '未知';
+  const d = new Date(Number(ms));
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function stamp() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+function hasPi() {
+  // 不能用 sh -c 'command -v': Windows 原生没 sh，会把已装的 pi 误判成未装
+  return !!findCmd('pi');
+}
+
+// ---------------------------------------------------------------- 登录态
+
+/** 该区域的登录条目；只有 access 存在才算已登录。 */
+function authEntry(region) {
+  const entry = (readJson(AUTH_JSON) || {})[region.provider];
+  return entry && entry.access ? entry : null;
+}
+
+/**
+ * 登录状态文案。expires 是毫秒时间戳；过期不等于失效——扩展会拿 refresh 自动续。
+ */
+function loginState(region) {
+  const entry = authEntry(region);
+  if (!entry) return { loggedIn: false, note: '未登录' };
+  const ms = Number(entry.expires || 0);
+  const who = entry.userID ? `userID ${String(entry.userID).slice(0, 8)}…` : '已登录';
+  if (!ms) return { loggedIn: true, note: `已登录（${who}，到期时间未知）` };
+  const days = Math.floor((ms - Date.now()) / 86400000);
+  if (days < 0) return { loggedIn: true, note: `已登录（${who}，access 已于 ${fmtTime(ms)} 过期，扩展会自动续期）` };
+  return { loggedIn: true, note: `已登录（${who}，access 剩 ${days} 天）` };
+}
+
+/** pi 里该 provider 的模型行；pi 不可用时返回 null。 */
+function listModels(region) {
+  if (!hasPi()) return null;
+  const r = run('pi', ['--list-models'], { timeout: 180000 });
+  if (r.status !== 0) return null;
+  return r.stdout.split('\n').filter((l) => l.startsWith(`${region.provider} `));
+}
+
+function extensionPath() {
+  const cfg = readJson(CONFIG);
+  const vendor = cfg && cfg.vendorQoder;
+  return vendor && fs.existsSync(path.join(vendor, 'package.json')) ? vendor : null;
+}
+
+function extensionInstalled() {
+  return run('pi', ['list']).stdout.includes('pi-provider-qoder');
+}
+
+// ---------------------------------------------------------------- 命令
+
+function cmdStatus() {
+  console.log('Qoder 接入状态');
+  console.log(`  pi        : ${hasPi() ? run('pi', ['--version']).stdout || '可用' : '\x1b[1;31m未找到\x1b[0m'}`);
+  const vendor = extensionPath();
+  console.log(
+    `  扩展      : ${extensionInstalled() ? 'pi-provider-qoder 已安装' : `\x1b[1;33m未安装\x1b[0m`}` +
+      (vendor ? `（本仓库副本 ${path.relative(HOME, vendor)}）` : `（${CONFIG} 里没有记录仓库路径）`)
+  );
+  console.log(`  凭证文件  : ${fs.existsSync(AUTH_JSON) ? AUTH_JSON : `\x1b[1;33m${AUTH_JSON} 不存在\x1b[0m`}`);
+  console.log('');
+  for (const region of Object.values(REGIONS)) {
+    const st = loginState(region);
+    const mark = st.loggedIn ? `\x1b[1;32m${G.running}\x1b[0m` : `\x1b[1;33m${G.idle}\x1b[0m`;
+    console.log(`  ${mark} ${region.title}（provider ${region.provider}）`);
+    console.log(`      ${st.note}`);
+    const models = listModels(region);
+    if (models === null) console.log('      模型：无法读取（pi 不可用）');
+    else if (!models.length) console.log('      模型：无（未登录或扩展未加载）');
+    else console.log(`      模型：${models.length} 个`);
+  }
+}
+
+function cmdLogin(regionKey, patArg) {
+  const region = REGIONS[regionKey];
+  const pat = patArg || process.env.QODER_PAT || '';
+  if (!pat) {
+    console.log(`为 ${region.title}（provider ${region.provider}）登录：`);
+    console.log(`  1. 打开 ${region.patPage}，创建一个 PAT（pt- 开头）`);
+    console.log(`  2. 执行 qoder2pi login ${region.key} pt-xxxxxx`);
+    console.log(`     也可以跑 pi，在里面输入 /login ${region.provider}`);
+    return 0;
+  }
+  if (!hasPi()) fail('未找到 pi，请先运行仓库的安装脚本');
+  info(`用 PAT 登录 ${region.title}（provider ${region.provider}）…`);
+  // 扩展在启动时读到该环境变量就会兑换 token 并写入 auth.json，所以这里跑一次
+  // --list-models 即可，不需要进入交互界面。
+  const env = { ...process.env, [region.patEnv]: pat };
+  const r = spawnSync('pi', ['--provider', region.provider, '--list-models'], { env, encoding: 'utf8', timeout: 180000 });
+  if (authEntry(region)) {
+    ok(`已登录：${loginState(region).note}`);
+    return 0;
+  }
+  warn('环境变量登录没有生效。');
+  const detail = `${(r.stdout || '').trim()}\n${(r.stderr || '').trim()}`.trim();
+  if (detail) console.log(detail.split('\n').slice(-5).join('\n'));
+  console.log(`      请跑 pi，在里面输入 /login ${region.provider} 手动登录`);
+  return 1;
+}
+
+function cmdLogout(regionKey) {
+  const region = REGIONS[regionKey];
+  const data = readJson(AUTH_JSON);
+  if (!data || !data[region.provider]) {
+    warn(`${region.title} 本来就没有登录凭据`);
+    return 0;
+  }
+  const backup = `${AUTH_JSON}.bak-${stamp()}`;
+  fs.copyFileSync(AUTH_JSON, backup);
+  delete data[region.provider];
+  fs.writeFileSync(AUTH_JSON, `${JSON.stringify(data, null, 2)}\n`);
+  ok(`已退出 ${region.title}`);
+  info(`原凭证已备份为 ${backup}`);
+  return 0;
+}
+
+function cmdInstallExtension() {
+  const vendor = extensionPath();
+  if (!vendor) {
+    fail(`找不到扩展副本：${CONFIG} 里没有有效的 vendorQoder 路径。请重新运行 qoder2pi/install-pi-qoder.sh`);
+  }
+  if (extensionInstalled()) {
+    ok('pi-provider-qoder 已安装。要重装请先 pi uninstall pi-provider-qoder 再执行本命令');
+    return 0;
+  }
+  info(`从本仓库副本安装扩展：${vendor}`);
+  const r = run('pi', ['install', vendor], { timeout: 300000, stdio: 'inherit' });
+  if (r.status !== 0) fail('pi install 失败');
+  ok('扩展已安装');
+  return 0;
+}
+
+function cmdModels() {
+  if (!hasPi()) fail('未找到 pi');
+  const out = [];
+  for (const region of Object.values(REGIONS)) {
+    const models = listModels(region) || [];
+    out.push(`${region.title}（provider ${region.provider}）：${models.length} 个模型`);
+    for (const line of models) out.push(`  ${line}`);
+    out.push('');
+  }
+  return out.join('\n').trimEnd();
+}
+
+function cmdDoctor() {
+  let bad = 0;
+  const mark = (good, text, hint) => {
+    if (good) ok(text);
+    else {
+      bad += 1;
+      warn(`${text}${hint ? `　→ ${hint}` : ''}`);
+    }
+  };
+
+  mark(true, `Node.js ${process.version}`);
+  const piOk = hasPi();
+  mark(piOk, `pi：${piOk ? run('pi', ['--version']).stdout || '可用' : '未找到'}`, '运行仓库的安装脚本');
+  mark(extensionInstalled(), '扩展 pi-provider-qoder 已安装', '在本仓库运行 qoder2pi install-extension');
+  const vendor = extensionPath();
+  mark(!!vendor, `仓库内的扩展副本：${vendor || '未知'}`, `重新运行安装脚本以写入 ${CONFIG}`);
+
+  for (const region of Object.values(REGIONS)) {
+    const st = loginState(region);
+    mark(st.loggedIn, `${region.title}：${st.note}`, `qoder2pi login ${region.key} pt-xxxxxx`);
+    const models = listModels(region);
+    mark(Array.isArray(models) && models.length > 0, `${region.title} 在 pi 里可见模型：${models ? models.length : 0} 个`,
+      '确认扩展已加载，并重开 pi');
+  }
+
+  console.log('');
+  bad === 0 ? ok('自检全部通过') : warn(`自检有 ${bad} 项未通过`);
+  if (bad > 0) process.exit(1);
+}
+
+// ---------------------------------------------------------------- 交互式控制台
+
+/** 把子命令回包给自己当子进程跑：内部函数失败会 process.exit，直接调会把界面打乱。 */
+function runSelf(args, { inherit = false, env } = {}) {
+  const r = spawnSync(process.execPath, [__filename, ...args], {
+    stdio: inherit ? 'inherit' : 'pipe',
+    encoding: inherit ? undefined : 'utf8',
+    timeout: 600000,
+    env: env ? { ...process.env, ...env } : process.env,
+  });
+  if (inherit) return { ok: r.status === 0, out: '' };
+  const out = `${r.stdout || ''}${r.stderr || ''}`.replace(/\x1b\[[0-9;]*m/g, '').trim();
+  return { ok: r.status === 0, out };
+}
+
+/** 退出界面后用它读一行输入（PAT）。 */
+function promptLine(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+/**
+ * 这一页的接线：refresh 返回要展示的数据，onAction 处理操作。
+ * 抽成对象是为了让总控 qodbuddy2pi 能把它当作一个页直接嵌进去，
+ * 业务函数（cmdLogin/cmdModels/runSelf 等）一行没动。
+ */
+const qoderPage = {
+  label: 'Qoder',
+  title: 'Qoder · 控制台',
+  subtitle: `pi 的 qoder-cn（国内版）与 qoder（国际版）　·　凭证在 ~/.pi/agent/auth.json`,
+
+  async refresh() {
+    const rows = Object.values(REGIONS).map((region) => {
+      const st = loginState(region);
+      const models = listModels(region);
+      return {
+        key: region.key,
+        label: `${region.title}  ${region.provider}`,
+        note: models && models.length ? `${st.note} · ${models.length} 个模型` : st.note,
+        active: st.loggedIn,
+      };
+    });
+
+    return {
+      status: [
+        ['pi', hasPi() ? `${C.green}${G.ok}${C.reset} ${run('pi', ['--version']).stdout || '可用'}` : `${C.red}${G.bad}${C.reset} 未找到`],
+        ['扩展', extensionInstalled()
+          ? `${C.green}${G.ok}${C.reset} pi-provider-qoder 已安装`
+          : `${C.yellow}${G.idle}${C.reset} 未安装（执行「更新扩展」）`],
+        ['凭证', fs.existsSync(AUTH_JSON) ? `${C.green}${G.ok}${C.reset} ${AUTH_JSON}` : `${C.red}${G.bad}${C.reset} 不存在`],
+      ],
+      sections: [{
+        id: 'regions',
+        title: '区域',
+        hint: `${G.running} 已登录　${G.idle} 未登录　·　两个区域并存，不需要切换`,
+        rows,
+      }],
+      menu: [
+        { id: 'login-cn', group: '登录', label: '登录国内版', note: 'qoder-cn · 粘贴 PAT' },
+        { id: 'login-global', group: '登录', label: '登录国际版', note: 'qoder · 粘贴 PAT' },
+        { id: 'logout', group: '登录', label: '退出登录', note: '删掉某个区域的凭证',
+          pick: 'regions', pickTitle: '退出哪个区域的登录' },
+        { id: 'extension', group: '维护', label: '更新扩展', note: '从本仓库的副本重装' },
+        { id: 'models', group: '维护', label: '查看模型', note: '两个区域各自在 pi 里可见的模型' },
+        { id: 'doctor', group: '维护', label: '自检', note: '检查 pi、扩展与两个区域的登录态' },
+        { id: 'quit', group: '界面', label: '退出', note: '' },
+      ],
+    };
+  },
+
+  async onAction(id, pickedKey) {
+    if (id === 'quit') return { quit: true };
+
+    if (id === 'login-cn' || id === 'login-global') {
+      const regionKey = id === 'login-cn' ? 'cn' : 'global';
+      const region = REGIONS[regionKey];
+      // 输入 PAT 必须把终端交出去，界面里没法输入
+      return {
+        suspend: async () => {
+          const pat = await promptLine(`粘贴 ${region.title} 的 PAT（直接回车取消）：`);
+          if (!pat) return;
+          const r = runSelf(['login', regionKey], { env: { QODER_PAT: pat } });
+          if (!r.ok) throw new Error(r.out.split('\n').filter(Boolean).slice(-1)[0] || '登录失败');
+        },
+        after: '登录完成',
+      };
+    }
+
+    if (id === 'extension') {
+      return {
+        suspend: async () => {
+          const r = runSelf(['install-extension'], { inherit: true });
+          if (!r.ok) throw new Error('扩展安装失败');
+        },
+        after: '扩展已就绪',
+      };
+    }
+
+    let r;
+    if (id === 'logout') r = runSelf(['logout', pickedKey]);
+    else if (id === 'models') r = { ok: true, out: cmdModels() };
+    else if (id === 'doctor') r = runSelf(['doctor']);
+    else return { flash: `未知操作：${id}`, error: true };
+
+    if (id === 'models' || id === 'doctor' || !r.ok) {
+      return { title: `${id === 'models' ? '模型' : '自检'} · Qoder`, body: r.out, error: !r.ok };
+    }
+    return { flash: r.out.split('\n').filter(Boolean).slice(-1)[0] || '完成' };
+  },
+};
+
+async function tuiMain() {
+  await createTui({ ...qoderPage, title: qoderPage.title, subtitle: qoderPage.subtitle });
+}
+
+// ---------------------------------------------------------------- 入口
+
+function usage() {
+  console.log(`qoder2pi — Qoder 接入 pi 的运维命令
+
+用法：
+  qoder2pi                       进入交互界面（不带参数且是终端时默认如此）
+  qoder2pi status                查看 pi、扩展与两个区域的登录状态（纯文本）
+  qoder2pi tui                   同上，显式进交互界面
+  qoder2pi login <cn|global> [PAT]   用 PAT 登录；不给 PAT 时打印手动步骤
+  qoder2pi logout <cn|global>    退出登录（auth.json 会先备份）
+  qoder2pi install-extension     从本仓库的副本安装 pi-provider-qoder
+  qoder2pi models                列出两个区域在 pi 里可见的模型
+  qoder2pi doctor                自检（有失败项时退出码非零）
+
+两个区域并存，不需要二选一：国内版是 provider qoder-cn，国际版是 provider qoder。
+PAT 获取：国内版 https://qoder.com.cn/account/integrations
+          国际版 https://qoder.com/account/integrations
+
+Qoder 没有本机服务，凭证直接存在 pi 的 ~/.pi/agent/auth.json，所以这里没有
+端口、服务与账号切换这类操作——那些是 WorkBuddy 側才需要的。`);
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+
+  // 不带子命令时进交互界面；管道或重定向时退回纯文本，避免把控制字符灌进文件
+  if (!argv.length && process.stdout.isTTY && process.stdin.isTTY) return tuiMain();
+
+  const cmd = (argv[0] || 'status').toLowerCase();
+  const regionArg = (argv[1] || '').toLowerCase();
+
+  const needRegion = () => {
+    const key = REGION_ALIASES[regionArg];
+    if (!key) fail(`请指定区域：cn 或 global（也可以用 provider 名 qoder-cn / qoder）`);
+    return key;
+  };
+
+  switch (cmd) {
+    case 'status':
+      return cmdStatus();
+    case 'tui':
+      return tuiMain();
+    case 'login':
+      return process.exit(cmdLogin(needRegion(), argv[2]) || 0);
+    case 'logout':
+      return process.exit(cmdLogout(needRegion()) || 0);
+    case 'install-extension':
+      return process.exit(cmdInstallExtension() || 0);
+    case 'models':
+      console.log(cmdModels());
+      return;
+    case 'doctor':
+      return cmdDoctor();
+    case '-h':
+    case '--help':
+    case 'help':
+      return usage();
+    default:
+      usage();
+      fail(`未知子命令：${cmd}`);
+  }
+}
+
+// 被 require 时（总控 qodbuddy2pi）只导出页定义，不执行命令行入口
+module.exports = { qoderPage };
+
+if (require.main === module) main().catch((e) => fail(e && e.stack ? e.stack : String(e)));

@@ -1,0 +1,22 @@
+# 行尾规则写进仓库，不依赖每个人本机的 core.autocrlf 设置。
+#
+# .cmd 会被 cmd.exe 逐字节解析：行尾是 LF 而不是 CRLF 时，setlocal、exit /b 这类
+# 命令的尾部会带上杂字符，表现为「不是内部或外部命令」或参数被污染。
+# 在 Unix 上新建 .cmd 很容易漏掉这点，所以在这里定死。
+*.cmd text eol=crlf
+
+# Node 入口与 shell 脚本必须保持 LF：shebang 行尾带 \r 会让内核找不到解释器
+*.sh  text eol=lf
+qodbuddy text eol=lf
+
+# 零依赖的运维命令与界面模块，没有自己的扩展名
+assets/workbuddy2pi        text eol=lf
+assets/workbuddy2pi-global text eol=lf
+assets/qoder2pi            text eol=lf
+assets/tui.js              text eol=lf
+assets/wizard.js           text eol=lf
+
+# 预编译的 Python wheel 与 tgz 是二进制，不要做任何行尾转换
+*.whl binary
+*.tgz binary
+*.png binary

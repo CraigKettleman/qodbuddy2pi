@@ -2,18 +2,38 @@
 
 这里存放原本要从远端仓库/包仓库拉取的两份第三方制品，让安装脚本不再依赖上游的发版节奏、可用性或内容变更。**仓库是这些文件的唯一来源**，安装脚本只把它们复制到本机，不会再去远端取。
 
-拉取时间：2026-09-27（本次更新仅 pi-provider-qoder；workbuddy2api 未变动）
+拉取时间：2026-10-12（本次更新 workbuddy2api 2.0.4 → 2.0.6，以支持国际版后端）
 
 | 文件 | 版本 | 来源 | 许可 | SHA-256 |
 |---|---|---|---|---|
-| `workbuddy2api-2.0.4-py3-none-any.whl` | 2.0.4 | PyPI 包 `workbuddy2api` | MIT，见 `workbuddy2api-LICENSE` | `8e6d5028da88978fc536eb03b62aede8d9619f89736ca9dd4f324df954173a35` |
-| `workbuddy2api-LICENSE` | — | 从 wheel 内 `workbuddy2api-2.0.4.dist-info/licenses/LICENSE` 导出 | MIT © 2026 Mayer | — |
+| `workbuddy2api-2.0.6-py3-none-any.whl` | 2.0.6 | PyPI 包 `workbuddy2api` | MIT，见 `workbuddy2api-LICENSE` | `695bc24159bd318a8827f5036b190fa881351d8f67aacfc44818206a37ece672` |
+| `workbuddy2api-LICENSE` | — | 从 wheel 内 `workbuddy2api-2.0.6.dist-info/licenses/LICENSE` 导出 | MIT © 2026 Mayer | — |
 | `pi-provider-qoder/` | 0.4.6 | npm 包 `pi-provider-qoder` 解包（`dist/` + `package.json` + `README.md`） | MIT | 见下方 tarball |
 | `pi-provider-qoder-0.4.6.tgz` | 0.4.6 | npm 原始 tarball，仅用于完整性复核 | MIT | `d693b7e94bf26037f25f13ae4454d310d2aec10326c240a1e7d07405c456874c` |
 
 npm 原始 integrity（sha512）：`6VqeCBhTRNQBeNLOAvl0qmePTpsMImcF4K03rHFV3G/W/Nw9IIB6+RDimlqeSsi1R7aJn0gFEzcn+P2WV5koiw==`
 
 两个包的上游仓库分别是 PyPI 上的 `workbuddy2api`（版权人 Mayer）与 `github.com/simonsmh/pi-provider-qoder`。注意：前者**不是** GitHub 上的 `Tom6814/WorkBuddy2API`——那个仓库是同名的另一套实现，本仓库没有使用它。
+
+## 为什么是 2.0.6
+
+2.0.4 没有区域（region）概念，上游端点写死为国内 `https://copilot.tencent.com`，因此无法接入
+国际版账号。2.0.5 起官方加入国际版后端，2.0.6 是当前版本，两者差异如下：
+
+| | 国内版 | 国际版 |
+|---|---|---|
+| 启动参数 | 无 | `--global`（另需 `--endpoint` 覆盖，见下） |
+| 上游端点 | `https://copilot.tencent.com` | 默认 `https://www.codebuddy.ai`；本项目用 `https://www.workbuddy.ai` |
+| session 文件 | `~/.codebuddy-session.json` | `~/.codebuddy-global-session.json` |
+| 模型表 | `models_config.domestic.json` | `models_config.global.json` |
+
+升级不会破坏已有的国内版配置：2.0.6 在 session 文件缺少 `backend` 元数据时，只要仍是
+domestic profile + 默认端点就照常读取；写入时才补上 `backend` / `endpoint` 字段。
+
+两个 provider 必须各自使用自己的实例，不能共用：上游端点、session 文件和模型表都不同。
+注意上表的「模型表」只是反代自带的静态清单，**与服务端真实可服务的 id 对不上**
+（国际版那张里的 claude-4.0 / gpt-5 / gemini-2.5-pro 并不存在，请求一律 11102）；
+pi 侧的模型目录以客户端落盘的产品配置为准，见 `assets/workbuddy.ts` 的说明。
 
 ## 安装脚本如何使用
 

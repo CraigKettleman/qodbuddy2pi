@@ -14,3 +14,7 @@ node_modules/
 __pycache__/
 *.pyc
 .venv/
+
+# npm 打包产物（npm pack 会生成，不要入库；注意 assets/vendor/*.tgz 是要提交的依赖）
+qodbuddy2pi-*.tgz
+release/

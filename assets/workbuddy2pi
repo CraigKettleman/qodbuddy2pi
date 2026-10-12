@@ -25,17 +25,12 @@ const http = require('http');
 const https = require('https');
 const { spawnSync } = require('child_process');
 
-const PORT = 8787;
-const BASE = `http://127.0.0.1:${PORT}`;
 const HOME = os.homedir();
 const DATA_DIR = path.join(HOME, '.workbuddy2api');
-const SLOTS_DIR = path.join(DATA_DIR, 'sessions');
 const VENDOR_DIR = path.join(DATA_DIR, 'vendor');
-const LIVE = path.join(HOME, '.codebuddy-session.json');
 const ACCOUNTS_LIB = path.join(HOME, '.wb-switch', 'accounts.json');
 const EXTENSION = path.join(HOME, '.pi', 'agent', 'extensions', 'workbuddy.ts');
 const AUTH_JSON = path.join(HOME, '.pi', 'agent', 'auth.json');
-const ENDPOINT = 'https://copilot.tencent.com';
 
 const IS_MAC = process.platform === 'darwin';
 const IS_LINUX = process.platform === 'linux';
@@ -49,12 +44,92 @@ const USER = (() => {
   }
 })();
 
-const LABEL = `com.${USER}.workbuddy2api`; // launchd 标签
-const UNIT = 'workbuddy2api'; // systemd 单元名
-const TASK = 'workbuddy2pi'; // Windows 计划任务名
-const PLIST = path.join(HOME, 'Library', 'LaunchAgents', `${LABEL}.plist`);
-const SYSTEMD_UNIT = path.join(HOME, '.config', 'systemd', 'user', `${UNIT}.service`);
-const SERVE_CMD = path.join(DATA_DIR, 'serve.cmd');
+/**
+ * 两个 region 各自独立：不同的反代后端、端口、session 文件、账号 slot 与服务实例。
+ *
+ * 国内版沿用 8787 与 ~/.codebuddy-session.json，行为与旧版完全一致。国际版换用
+ * `--global`，反代因此启用它的 global backend profile（独立的模型表与 session
+ * 文件），两端互不影响，可以同时在线。
+ *
+ * 两个 region 的 token 不通用：国内版是明文 JWT，国际版落盘的是加密对象，
+ * 因此 codebuddy_proxy 会把 session 文件按 backend 元数据隔离，这里也必须给
+ * 国际版单独的 session 与 slot 目录，不能复用国内版那套。
+ *
+ * 为什么用进程级变量而不是把 region 作为参数逐层传递：一次调用只服务一个
+ * region，selectRegion() 在 main() 入口设定一次即可，改动面最小。
+ */
+function defineRegion(spec) {
+  const label = `com.${USER}.workbuddy2api${spec.suffix}`;
+  const unit = `workbuddy2api${spec.suffix}`;
+  return {
+    ...spec,
+    label,
+    unit,
+    task: `workbuddy2pi${spec.suffix}`,
+    plist: path.join(HOME, 'Library', 'LaunchAgents', `${label}.plist`),
+    systemdUnit: path.join(HOME, '.config', 'systemd', 'user', `${unit}.service`),
+    serveCmd: path.join(DATA_DIR, `serve${spec.suffix}.cmd`),
+  };
+}
+
+const REGIONS = {
+  domestic: defineRegion({
+    key: 'domestic',
+    title: '国内版',
+    suffix: '',
+    port: 8787,
+    live: path.join(HOME, '.codebuddy-session.json'),
+    slotsDir: path.join(DATA_DIR, 'sessions'),
+    logDir: DATA_DIR,
+    endpoint: 'https://copilot.tencent.com',
+    // 桌面端落盘的登录文件：国内版不带后缀，国际版带 -ai
+    desktopInfoName: /^workbuddy-desktop\.info$/,
+    proxyArgs: [],
+  }),
+  global: defineRegion({
+    key: 'global',
+    title: '国际版',
+    suffix: '-global',
+    port: 8788,
+    live: path.join(HOME, '.codebuddy-global-session.json'),
+    slotsDir: path.join(DATA_DIR, 'sessions-global'),
+    logDir: path.join(DATA_DIR, 'global'),
+    // 反代 2.0.6 的国际版默认端点是 www.codebuddy.ai；本项目实际使用的是
+    // workbuddy.ai（账号自身的 domain 也是它），所以显式覆盖。
+    endpoint: 'https://www.workbuddy.ai',
+    desktopInfoName: /^workbuddy-desktop-ai\.info$/,
+    proxyArgs: ['--global', '--endpoint', 'https://www.workbuddy.ai'],
+  }),
+};
+
+let REGION = REGIONS.domestic;
+let PORT = REGION.port;
+let BASE = `http://127.0.0.1:${PORT}`;
+let SLOTS_DIR = REGION.slotsDir;
+let LIVE = REGION.live;
+let ENDPOINT = REGION.endpoint;
+let LABEL = REGION.label;
+let UNIT = REGION.unit;
+let TASK = REGION.task;
+let PLIST = REGION.plist;
+let SYSTEMD_UNIT = REGION.systemdUnit;
+let SERVE_CMD = REGION.serveCmd;
+
+function selectRegion(key) {
+  REGION = REGIONS[key] || REGIONS.domestic;
+  PORT = REGION.port;
+  BASE = `http://127.0.0.1:${PORT}`;
+  SLOTS_DIR = REGION.slotsDir;
+  LIVE = REGION.live;
+  ENDPOINT = REGION.endpoint;
+  LABEL = REGION.label;
+  UNIT = REGION.unit;
+  TASK = REGION.task;
+  PLIST = REGION.plist;
+  SYSTEMD_UNIT = REGION.systemdUnit;
+  SERVE_CMD = REGION.serveCmd;
+}
+
 const UV_FALLBACKS = IS_WIN
   ? [path.join(HOME, '.local', 'bin', 'uv.exe')]
   : [path.join(HOME, '.local', 'bin', 'uv'), '/usr/local/bin/uv', '/opt/homebrew/bin/uv'];
@@ -156,13 +231,8 @@ function requireVendoredWheel() {
 }
 
 function findUv() {
-  const probe = IS_WIN
-    ? run('where', ['uv'])
-    : run('sh', ['-c', 'command -v uv']);
-  if (probe.status === 0 && probe.stdout) {
-    const first = probe.stdout.split(/\r?\n/).find(Boolean);
-    if (first && fs.existsSync(first.trim())) return first.trim();
-  }
+  const found = findCmd('uv');
+  if (found) return found;
   for (const candidate of UV_FALLBACKS) {
     if (fs.existsSync(candidate)) return candidate;
   }
@@ -177,6 +247,22 @@ function fmtTime(ms) {
     `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
     `${pad(d.getHours())}:${pad(d.getMinutes())}`
   );
+}
+
+/**
+ * 凭证有效期的人类描述。
+ *
+ * 国际版签发的 access_token 有效期正好是 365 天，到期时间看起来像「登录时间加一年」。
+ * 只写「某日到期」会让人以为显示错了登录时间，所以必须把还剩多久一起说出来。
+ */
+function describeExpiry(auth = {}) {
+  const ms = Number(auth.expiresAt || 0);
+  if (!ms) return { text: '有效期未知', days: null };
+  const days = Math.floor((ms - Date.now()) / 86400000);
+  const when = fmtTime(ms);
+  if (days < 0) return { text: `已于 ${when} 过期`, days };
+  if (days === 0) return { text: `今天 ${when.slice(11)} 到期`, days };
+  return { text: `剩 ${days} 天（至 ${when}）`, days };
 }
 
 function request(method, url, { headers = {}, body = null } = {}, timeout = 30000) {
@@ -251,9 +337,28 @@ function serviceStatus() {
   };
 }
 
+/** 反代自身的 region 参数：国内版为空，国际版为 --global --endpoint <url>。 */
+function proxyArgsInline() {
+  return REGION.proxyArgs.length ? ` ${REGION.proxyArgs.join(' ')}` : '';
+}
+
+/**
+ * 两个 region 同时在线时不能共用日志目录：反代除了 --log-file 指定的结构化日志，
+ * 还会在同一目录里再写一份人读的 proxy.log，共用目录会让两个实例的日志穿插。
+ */
+function regionLogDir() {
+  return REGION.logDir;
+}
+
+/** 提示用户敲哪条命令时用；国际版要走 `workbuddy2pi global …` 子命令。 */
+function binName() {
+  return REGION.key === 'domestic' ? 'workbuddy2pi' : `workbuddy2pi ${REGION.key}`;
+}
+
 function launchdPlist(uv, wheel) {
-  const logFile = path.join(DATA_DIR, 'codebuddy-proxy.jsonl');
-  const stdout = path.join(DATA_DIR, 'proxy-stdout.log');
+  const logFile = path.join(regionLogDir(), 'codebuddy-proxy.jsonl');
+  const stdout = path.join(regionLogDir(), 'proxy-stdout.log');
+  const regionArgs = REGION.proxyArgs.map((a) => `\t\t<string>${a}</string>`).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -275,7 +380,7 @@ function launchdPlist(uv, wheel) {
 		<string>--host</string>
 		<string>127.0.0.1</string>
 		<string>--port</string>
-		<string>${PORT}</string>
+		<string>${PORT}</string>${regionArgs ? `\n${regionArgs}` : ''}
 		<string>--desensitize</string>
 		<string>--log-file</string>
 		<string>${logFile}</string>
@@ -305,15 +410,15 @@ function launchdPlist(uv, wheel) {
 }
 
 function systemdUnit(uv, wheel) {
-  const logFile = path.join(DATA_DIR, 'codebuddy-proxy.jsonl');
-  const stdout = path.join(DATA_DIR, 'proxy-stdout.log');
+  const logFile = path.join(regionLogDir(), 'codebuddy-proxy.jsonl');
+  const stdout = path.join(regionLogDir(), 'proxy-stdout.log');
   return `[Unit]
 Description=WorkBuddy 反代（codebuddy_proxy），把 WorkBuddy 额度转成 OpenAI 兼容端点
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${uv} run --with "${wheel}" python -m codebuddy_proxy --host 127.0.0.1 --port ${PORT} --desensitize --log-file ${logFile}
+ExecStart=${uv} run --with "${wheel}" python -m codebuddy_proxy --host 127.0.0.1 --port ${PORT}${proxyArgsInline()} --desensitize --log-file ${logFile}
 WorkingDirectory=${HOME}
 Restart=always
 RestartSec=15
@@ -326,14 +431,14 @@ WantedBy=default.target
 }
 
 function windowsServeCmd(uv, wheel) {
-  const logFile = path.join(DATA_DIR, 'codebuddy-proxy.jsonl');
-  const stdout = path.join(DATA_DIR, 'proxy-stdout.log');
+  const logFile = path.join(regionLogDir(), 'codebuddy-proxy.jsonl');
+  const stdout = path.join(regionLogDir(), 'proxy-stdout.log');
   // 计划任务不会在崩溃后重启进程，所以用循环做 keep-alive。
   return `@echo off
 rem 由 workbuddy2pi install-service 生成，请勿手工编辑。
 setlocal
 :loop
-"${uv}" run --with "${wheel}" python -m codebuddy_proxy --host 127.0.0.1 --port ${PORT} --desensitize --log-file "${logFile}" >> "${stdout}" 2>&1
+"${uv}" run --with "${wheel}" python -m codebuddy_proxy --host 127.0.0.1 --port ${PORT}${proxyArgsInline()} --desensitize --log-file "${logFile}" >> "${stdout}" 2>&1
 timeout /t 15 /nobreak >nul
 goto loop
 `;
@@ -344,6 +449,7 @@ function installService() {
   if (!uv) fail('未找到 uv，请先运行本仓库的 workbuddy2pi/install-workbuddy2pi.sh（或 .ps1）');
   const wheel = requireVendoredWheel();
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(regionLogDir(), { recursive: true });
 
   if (IS_MAC) {
     fs.mkdirSync(path.dirname(PLIST), { recursive: true });
@@ -477,7 +583,7 @@ function listSlots() {
   if (!fs.existsSync(SLOTS_DIR)) return [];
   return fs
     .readdirSync(SLOTS_DIR)
-    .filter((n) => n.endsWith('.json') && !n.includes('original'))
+    .filter((n) => n.endsWith('.json') && !/original|removed/.test(n))
     .map((n) => {
       const file = path.join(SLOTS_DIR, n);
       const data = readJson(file);
@@ -503,11 +609,21 @@ function activeKey() {
   return hit ? hit.key : null;
 }
 
+/**
+ * 账号显示名。国际版把 nickname 落盘成加密对象（{$wbEncrypted:1,envelope}），
+ * 直接当字符串用会打印出 [object Object]，因此只接受字符串形式的昵称。
+ */
+function displayName(account = {}) {
+  const raw = account.nickname;
+  if (typeof raw === 'string' && raw.trim()) return raw;
+  return account.uin || account.uid || '<未知>';
+}
+
 function describe(slot) {
-  const name = slot.account.nickname || slot.account.uid || '<未知>';
-  return `${slot.key}: ${name}（uid ${slot.account.uid || '?'}） | access_token 到期 ${fmtTime(
-    slot.auth.expiresAt
-  )} | refresh_token 到期 ${fmtTime(slot.auth.refreshExpiresAt)}`;
+  const name = displayName(slot.account);
+  return `${slot.key}: ${name}（uid ${slot.account.uid || '?'}） | access_token ${
+    describeExpiry(slot.auth).text
+  } | refresh_token 到期 ${fmtTime(slot.auth.refreshExpiresAt)}`;
 }
 
 /**
@@ -602,7 +718,7 @@ async function renewSlot(key) {
   const data = readJson(slot.file);
   const auth = data.auth || {};
   const account = data.account || {};
-  info(`续期 slot ${key}（${account.nickname || account.uid}）…`);
+  info(`续期 slot ${key}（${displayName(account)}）…`);
 
   const headers = { ...REFRESH_HEADERS(account), 'X-Refresh-Token': String(auth.refreshToken || '') };
   if (auth.domain) headers['X-Domain'] = String(auth.domain);
@@ -693,13 +809,12 @@ function currentMachineId() {
   return fromSlot ? fromSlot.data.machineId : computeMachineId();
 }
 
-/** 有界搜索 WorkBuddy 桌面端落盘的登录文件。 */
+/** 有界搜索 WorkBuddy 桌面端落盘的登录文件（按当前 region 选择文件名）。 */
 function findDesktopInfo() {
+  const authDir = path.join(HOME, 'Library', 'Application Support', 'CodeBuddyExtension',
+    'Data', 'Public', 'auth');
   const named = [
-    path.join(HOME, 'Library', 'Application Support', 'CodeBuddyExtension', 'Data', 'Public', 'auth',
-      'workbuddy-desktop.info'),
-    path.join(HOME, 'Library', 'Application Support', 'CodeBuddyExtension', 'Data', 'Public', 'auth',
-      'workbuddy-desktop-ai.info'),
+    path.join(authDir, REGION.key === 'global' ? 'workbuddy-desktop-ai.info' : 'workbuddy-desktop.info'),
   ];
   for (const p of named) if (fs.existsSync(p)) return p;
 
@@ -722,7 +837,7 @@ function findDesktopInfo() {
       return null;
     }
     for (const e of entries) {
-      if (e.isFile() && /^workbuddy-desktop.*\.info$/.test(e.name)) return path.join(dir, e.name);
+      if (e.isFile() && REGION.desktopInfoName.test(e.name)) return path.join(dir, e.name);
     }
     for (const e of entries) {
       if (!e.isDirectory() || SKIP.has(e.name) || e.name.startsWith('.')) continue;
@@ -754,37 +869,58 @@ function nextSlotKey(taken) {
  * 服务端/桌面端的 auth 对象只有相对的 expiresIn，而反代依赖绝对的 expiresAt
  * 判断是否需要刷新；这里统一补算，避免踩到“expiresAt 缺失后再不刷新”的坑。
  */
+/**
+ * 补算绝对的 expiresAt / refreshExpiresAt。
+ *
+ * 服务端只给相对的 expiresIn，而反代只按绝对的 expiresAt 判断是否需要刷新；
+ * 缺了它的 session 会被当成「永不过期」，此后再不刷新，access_token 一过期就全量 401。
+ * 所以不管是导入桌面端文件还是浏览器登录，写盘前都要补上。
+ */
+function withAbsoluteExpiry(auth) {
+  const nowMs = Date.now();
+  const next = { ...auth };
+  if (next.expiresAt == null) {
+    const seconds = Number(next.expiresIn || 0);
+    if (!seconds) fail('凭证里既没有 expiresAt 也没有 expiresIn，无法确定有效期');
+    next.expiresAt = nowMs + seconds * 1000;
+  }
+  if (next.refreshExpiresAt == null && Number(next.refreshExpiresIn || 0)) {
+    next.refreshExpiresAt = nowMs + Number(next.refreshExpiresIn) * 1000;
+  }
+  if (next.lastRefreshTime == null) next.lastRefreshTime = nowMs;
+  return next;
+}
+
 function importSession(file) {
   const src = file || findDesktopInfo();
   if (!src) {
-    fail('未找到 WorkBuddy 桌面端登录文件。请在 WorkBuddy 里登录一次，或用 --login 走浏览器登录建档');
+    fail(`未找到 ${REGION.title}的桌面端登录文件。请在 WorkBuddy 里登录一次，或改用浏览器登录：${binName()} login`);
   }
   if (!fs.existsSync(src)) fail(`文件不存在：${src}`);
-  const info = readJson(src);
-  if (!info) fail(`无法解析为 JSON：${src}`);
-  const auth = info.auth || {};
+  const source = readJson(src);
+  if (!source) fail(`无法解析为 JSON：${src}`);
+  const auth = source.auth || {};
   if (!auth.accessToken || !auth.refreshToken) {
     fail(`${src} 里没有 accessToken/refreshToken，请先在 WorkBuddy 桌面端登录`);
   }
-  const account = info.account || {};
-  const nowMs = Date.now();
-  const nextAuth = { ...auth };
-  if (nextAuth.expiresAt == null) {
-    const seconds = Number(nextAuth.expiresIn || 0);
-    if (!seconds) fail('来源里既没有 expiresAt 也没有 expiresIn，无法确定有效期');
-    nextAuth.expiresAt = nowMs + seconds * 1000;
+  // 国际版把 token 落盘成 {$wbEncrypted:1, envelope:…} 加密对象，而反代会把它
+  // 当成字符串直接拼进 Authorization 头，用这种文件建的 slot 每个请求都 401。
+  // 与其建一个看似成功的坏 slot，不如在这里拦下来。
+  if (typeof auth.accessToken !== 'string' || typeof auth.refreshToken !== 'string') {
+    fail(
+      `${src} 里的 token 是加密对象，不能直接给反代使用。\n` +
+        `      请改用浏览器登录建档：${binName()} login`
+    );
   }
-  if (nextAuth.refreshExpiresAt == null && Number(nextAuth.refreshExpiresIn || 0)) {
-    nextAuth.refreshExpiresAt = nowMs + Number(nextAuth.refreshExpiresIn) * 1000;
-  }
-  if (nextAuth.lastRefreshTime == null) nextAuth.lastRefreshTime = nowMs;
+  const account = source.account || {};
+  const nextAuth = withAbsoluteExpiry(auth);
 
   const slots = listSlots();
   const existing = slots.find((s) => (s.account || {}).uid === account.uid);
   const key = existing ? existing.key : nextSlotKey(new Set(slots.map((s) => s.key)));
   const session = { auth: nextAuth, account, machineId: currentMachineId() };
   writeSlot(key, session);
-  ok(`已写入 slot ${key}：${account.nickname || account.uid || '<未知>'}（来源 ${src}）`);
+  ok(`已写入 slot ${key}：${displayName(account)}（来源 ${src}）`);
 
   const live = readJson(LIVE);
   const liveValid = !!(live && live.auth && live.auth.accessToken &&
@@ -793,7 +929,118 @@ function importSession(file) {
     writeFileTight(LIVE, JSON.stringify(session, null, 2) + '\n');
     ok(`已设为当前生效账号（${LIVE}）`);
   } else {
-    info('生效文件已有效，未改动；需要切换请执行 workbuddy2pi account ' + key);
+    info(`生效文件已有效，未改动；需要切换请执行 ${binName()} account ${key}`);
+  }
+}
+
+function dateStamp() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+}
+
+/** 添加账号。两个 region 的建档方式不同，由 region 决定走哪条路。 */
+async function cmdAccountAdd() {
+  if (REGION.key === 'global') return cmdLogin();
+  return importSession();
+}
+
+/**
+ * 删除账号 slot。文件改名归档而不是直接删：删错了可以改回来，
+ * 而 `listSlots()` 会把带 `-removed-` 的文件排除在列表外。
+ */
+function cmdAccountRemove(key) {
+  const slots = listSlots();
+  const keys = slots.map((s) => s.key).join(', ') || '无';
+  if (!key) fail(`请指定要删除的账号，例如：${binName()} account remove b（当前可选：${keys}）`);
+  const slot = slots.find((s) => s.key === key);
+  if (!slot) fail(`slot 不存在：${key}（当前可选：${keys}）`);
+
+  if (activeKey() === key) {
+    const others = slots.filter((s) => s.key !== key).map((s) => s.key);
+    fail(
+      `${key} 是当前生效的账号，不能直接删。\n` +
+        (others.length
+          ? `      先切到别的账号：${binName()} account ${others[0]}`
+          : `      这是本区域唯一的账号；真要清空，请手动删除 ${LIVE}`)
+    );
+  }
+
+  const archived = path.join(SLOTS_DIR, `${key}-removed-${dateStamp()}.json`);
+  fs.renameSync(slot.file, archived);
+  ok(`已删除账号 ${key}（uid ${slot.account.uid || '?'}）`);
+  info(`原凭证留档在 ${archived}，确认不需要可以自行删掉`);
+}
+
+// ---------------------------------------------------------------- 浏览器登录
+
+/**
+ * 走反代自带的登录流程：POST /v2/plugin/auth/state 拿 authUrl → 用户在浏览器
+ * 完成登录 → 轮询 /v2/plugin/auth/token 取回凭证。
+ *
+ * 拿回来的是服务端签发的明文凭证，与桌面端落盘的那份加密对象无关。国际版只
+ * 有这一条可行的建档路径（国内版仍可优先用 import-session 导入桌面端文件）。
+ */
+async function cmdLogin() {
+  const uv = findUv();
+  if (!uv) fail('未找到 uv，请先运行仓库的安装脚本');
+  const wheel = requireVendoredWheel();
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+
+  const tmp = path.join(DATA_DIR, `login-tmp${REGION.suffix || ''}.json`);
+  if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+
+  // 直接调用反代自己的 client，而不是用 --login 启动一个完整服务再杀掉：
+  // 流程一样，但不会多开一个监听端口。
+  const py = [
+    'from codebuddy_proxy.backend_profile import resolve_backend',
+    'from codebuddy_proxy.codebuddy_client_demo import CodeBuddyClient',
+    `backend = resolve_backend(global_mode=${REGION.key === 'global' ? 'True' : 'False'},`,
+    `    endpoint=${JSON.stringify(ENDPOINT)}, session_file=${JSON.stringify(tmp)})`,
+    'CodeBuddyClient(backend=backend).login()',
+    '',
+  ].join('\n');
+
+  info(`展开浏览器登录（${REGION.title}，端点 ${ENDPOINT}）…`);
+  const r = spawnSync(uv, ['run', '--with', wheel, 'python', '-c', py], {
+    stdio: 'inherit',
+    timeout: 600000,
+  });
+  if (r.error) fail(`启动登录流程失败：${r.error.message}`);
+  if (r.status !== 0) fail('登录未完成（可能是超时或浏览器里未登录成功），可重试');
+  if (!fs.existsSync(tmp)) fail('登录流程已结束，但没有写出 session 文件');
+
+  const session = readJson(tmp);
+  fs.unlinkSync(tmp);
+  const token = ((session || {}).auth || {}).accessToken;
+  if (typeof token !== 'string' || !token) fail('登录结果里没有可用的 accessToken');
+  // 登录接口同样只回相对的 expiresIn，不补的话会触发「永不过期→再不刷新」那个坑
+  session.auth = withAbsoluteExpiry(session.auth);
+
+  const account = session.account || {};
+  const slots = listSlots();
+  const existing = slots.find((s) => (s.account || {}).uid === account.uid);
+  const key = existing ? existing.key : nextSlotKey(new Set(slots.map((s) => s.key)));
+  writeSlot(key, session);
+  ok(`${existing ? '已更新' : '已写入'} slot ${key}：${displayName(account)}`);
+
+  const live = readJson(LIVE);
+  const liveValid = !!(
+    live && live.auth && typeof live.auth.accessToken === 'string' &&
+    Number(live.auth.expiresAt || 0) > Date.now()
+  );
+  if (liveValid) {
+    info(`生效文件已有效，未改动；需要切换请执行 ${binName()} account ${key}`);
+    return;
+  }
+
+  writeFileTight(LIVE, JSON.stringify(session, null, 2) + '\n');
+  ok(`已设为当前生效账号（${LIVE}）`);
+  if (serviceStatus().registered) {
+    info('正在重启服务…');
+    restartService();
+    const h = await waitHealthy();
+    h.ok ? ok(`端点正常（${h.models} 个模型）`) : warn(`端点未就绪：${h.note}，请查看 ${binName()} logs`);
   }
 }
 
@@ -807,8 +1054,14 @@ function checkSession() {
   process.exit(good ? 0 : 1);
 }
 
-/** 供安装脚本调用：保证 auth.json 里有 workbuddy 占位 key（本地反代不校验 key）。 */
+/**
+ * 供安装脚本调用：保证 auth.json 里有国内版与国际版两个占位 key。
+ *
+ * pi 注册 provider 时会校验存在认证方式，没有 key 的 provider 会被整块丢弃，
+ * 于是模型一个也不出现。两个 provider 各自需要一个占位 key，缺一不可。
+ */
 function ensureAuthKey() {
+  const KEYS = ['workbuddy', 'workbuddy-global'];
   fs.mkdirSync(path.dirname(AUTH_JSON), { recursive: true });
   let data = {};
   let existed = false;
@@ -818,12 +1071,13 @@ function ensureAuthKey() {
   } catch {
     /* 文件不存在或不是 JSON，按新建处理 */
   }
-  if (data.workbuddy) {
+  const missing = KEYS.filter((k) => !data[k]);
+  if (!missing.length) {
     console.log('present');
     return;
   }
   if (existed) fs.copyFileSync(AUTH_JSON, `${AUTH_JSON}.bak`);
-  data.workbuddy = { type: 'api_key', key: 'workbuddy-local' };
+  for (const k of missing) data[k] = { type: 'api_key', key: 'workbuddy-local' };
   fs.writeFileSync(AUTH_JSON, JSON.stringify(data, null, 2) + '\n');
   console.log('added');
 }
@@ -835,8 +1089,8 @@ async function cmdStatus() {
   const h = await health();
   const key = activeKey();
 
-  console.log('WorkBuddy 反代状态');
-  console.log(`  服务      : ${state.registered ? state.detail : '未注册（运行 workbuddy2pi install-service）'}`);
+  console.log(`WorkBuddy 反代状态（${REGION.title}）`);
+  console.log(`  服务      : ${state.registered ? state.detail : `未注册（运行 ${binName()} install-service）`}`);
   console.log(
     `  端点      : ${BASE}  ${h.ok ? `\x1b[1;32m✓ 正常，${h.models} 个模型\x1b[0m` : `\x1b[1;31m✗ ${h.note}\x1b[0m`}`
   );
@@ -858,7 +1112,7 @@ async function cmdStatus() {
   console.log(`  可用账号  : ${slots.length ? '' : '无'}`);
   for (const s of slots) console.log(`    ${s.key === key ? '*' : ' '} ${describe(s)}`);
 
-  const logFile = path.join(DATA_DIR, 'proxy.log');
+  const logFile = path.join(regionLogDir(), 'proxy.log');
   if (fs.existsSync(logFile)) {
     const mb = (fs.statSync(logFile).size / 1048576).toFixed(1);
     console.log(`  日志      : ${logFile}（${mb} MB）`);
@@ -868,7 +1122,7 @@ async function cmdStatus() {
 }
 
 function cmdLogs(lines) {
-  const logFile = path.join(DATA_DIR, 'proxy.log');
+  const logFile = path.join(regionLogDir(), 'proxy.log');
   if (!fs.existsSync(logFile)) fail(`日志文件不存在：${logFile}`);
   const all = fs.readFileSync(logFile, 'utf8').split('\n');
   process.stdout.write(all.slice(-(lines + 1)).join('\n'));
@@ -904,17 +1158,19 @@ async function cmdDoctor() {
   );
   mark(fs.existsSync(EXTENSION), `pi 扩展：${EXTENSION}`, '运行安装脚本');
   const auth = readJson(AUTH_JSON) || {};
-  mark(!!auth.workbuddy, 'auth.json 中存在 workbuddy 占位 key', '运行安装脚本');
+  mark(!!(auth.workbuddy && auth['workbuddy-global']), 'auth.json 中存在两个 provider 的占位 key',
+    '运行安装脚本（缺 key 的 provider 会被 pi 整块丢弃）');
 
   const state = serviceStatus();
   mark(state.registered, `常驻服务：${state.detail}`, '运行 workbuddy2pi install-service');
   const h = await health();
   mark(h.ok, `端点：${h.ok ? `${h.models} 个模型` : h.note}`, '查看 workbuddy2pi logs');
 
-  if (run('sh', ['-c', 'command -v pi']).status === 0 || !IS_WIN) {
+  if (findCmd('pi') || !IS_WIN) {
     const listed = run('pi', ['--list-models'], { timeout: 120000 });
-    const count = listed.stdout.split('\n').filter((l) => l.startsWith('workbuddy ')).length;
-    mark(count > 0, `pi 可见 workbuddy 模型：${count} 个`, '确认扩展已加载，并重开 pi');
+    const provider = REGION.key === 'global' ? 'workbuddy-global' : 'workbuddy';
+    const count = listed.stdout.split('\n').filter((l) => l.startsWith(`${provider} `)).length;
+    mark(count > 0, `pi 可见 ${provider} 模型：${count} 个`, '确认扩展已加载，并重开 pi');
   }
 
   console.log('');
@@ -922,34 +1178,234 @@ async function cmdDoctor() {
   if (bad > 0) process.exit(1);
 }
 
+// ---------------------------------------------------------------- 交互式控制台
+
+/**
+ * 界面本体在 ./tui.js（与 qoder2pi、安装向导共用同一套），这里只做接线：
+ * 把 WorkBuddy 的状态与操作映射成 tui.js 要的数据结构。
+ */
+const { createTui, C, G, findCmd } = require('./tui');
+
+/** pi 里对应的 provider 名，用于给用户交代「这个界面管的是什么」。 */
+function tuiProviderId() {
+  return REGION.key === 'global' ? 'workbuddy-global' : 'workbuddy';
+}
+
+/** 另一个区域，用来在两个界面之间互跳。 */
+function otherRegion() {
+  return REGION.key === 'global' ? REGIONS.domestic : REGIONS.global;
+}
+
+/** 把子命令回包给自己当子进程跑，避免直接调内部函数时 process.exit 打乱界面。 */
+function runSelf(args, { inherit = false } = {}) {
+  const regionArg = REGION.key === 'global' ? ['global'] : [];
+  const r = spawnSync(process.execPath, [__filename, ...regionArg, ...args], {
+    stdio: inherit ? 'inherit' : 'pipe',
+    encoding: inherit ? undefined : 'utf8',
+    timeout: 900000,
+  });
+  if (inherit) return { ok: r.status === 0, out: '' };
+  const out = `${r.stdout || ''}${r.stderr || ''}`.replace(/\x1b\[[0-9;]*m/g, '').trim();
+  return { ok: r.status === 0, out };
+}
+
+/**
+ * 一个区域的界面定义。抽成工厂是为了让总控 qodbuddy2pi 把两个区域
+ * 分别当成一页嵌进去：每个页在 refresh 开头 selectRegion 切到自己的区域，
+ * 因为 refresh 是同步取数、一次只跑一页，不会串。
+ *
+ * 嵌进总控时用页签切换，所以菜单里的「切换到另一个区域界面」要去掉；
+ * 独立运行时它仍然是原样（inTabs 为 false）。
+ */
+function workbuddyPage(regionKey, { inTabs = false } = {}) {
+  selectRegion(regionKey);
+  return {
+    label: `WorkBuddy ${REGION.title}`,
+    title: `WorkBuddy ${REGION.title} · 反代控制台`,
+
+    async refresh() {
+      selectRegion(regionKey);
+      const subtitle = `本机 127.0.0.1:${REGION.port} → pi 的 ${tuiProviderId()} provider　·　上游 ${REGION.endpoint}`;
+      const state = serviceStatus();
+      const h = await health();
+      const key = activeKey();
+      const rows = listSlots().map((s) => ({
+        key: s.key,
+        label: `${s.key}  ${displayName(s.account)}`,
+        note: `access_token ${describeExpiry(s.auth).text}`,
+        active: s.key === key,
+      }));
+      const active = rows.find((s) => s.key === key);
+      const service = state.registered
+        ? `${C.green}${G.running}${C.reset} ${state.detail
+            .replace(/^launchd |^systemd --user /, '')
+            .replace(/，state=/, ' · ')
+            .replace(/，pid=/, ' · pid ')}`
+        : `${C.yellow}${G.idle} 未注册${C.reset}（执行「安装服务」）`;
+
+      const menu = [
+        { id: 'switch', group: '账号', label: '切换账号', note: '换一个账号生效（会重启服务）',
+          pick: 'accounts', pickTitle: '切换到哪个账号', emptyHint: '还没有账号，先「添加账号」' },
+        { id: 'add', group: '账号', label: '添加账号',
+          note: REGION.key === 'global' ? '浏览器登录，存为一个新账号' : '从桌面端登录文件导入' },
+        { id: 'remove', group: '账号', label: '删除账号', note: '移除账号，凭证留档可恢复',
+          pick: 'accounts', pickTitle: '删除哪个账号', emptyHint: '还没有账号' },
+        { id: 'renew', group: '账号', label: '续期凭证', note: '用 refresh_token 换取新凭证',
+          pick: 'accounts', pickTitle: '续期哪个账号', emptyHint: '还没有账号' },
+        { id: 'restart', group: '服务', label: '重启服务', note: '重启本机反代进程' },
+        { id: 'install', group: '服务', label: '安装服务', note: '注册开机自启的常驻服务' },
+        { id: 'doctor', group: '服务', label: '自检', note: '检查依赖、凭证、服务与 pi 接入' },
+        { id: 'logs', group: '服务', label: '查看日志', note: '看反代日志尾部' },
+      ];
+      // 独立运行时提供跳到另一区域界面的入口；已经在页签里就没必要了
+      if (!inTabs) {
+        menu.push({ id: 'jump', group: '界面', label: `切换到${otherRegion().title}界面`,
+          note: `管理另一区域（端口 ${otherRegion().port}）` });
+      }
+      menu.push({ id: 'quit', group: '界面', label: '退出', note: '' });
+
+      return {
+        title: `WorkBuddy ${REGION.title} · 反代控制台`,
+        subtitle,
+        status: [
+          ['服务', service],
+          ['端点', h.ok
+            ? `${C.green}${G.ok}${C.reset} ${BASE} · 正常，${h.models} 个模型`
+            : `${C.red}${G.bad}${C.reset} ${BASE} · ${h.note}`],
+          ['当前', active
+            ? `${C.green}${G.current}${C.reset} ${active.label} · ${active.note}`
+            : `${C.yellow}无法判定${C.reset}（生效文件缺失或不属于任何 slot）`],
+        ],
+        sections: [{
+          id: 'accounts',
+          title: '账号',
+          hint: `${G.current} 当前生效　${G.other} 其它　·　access_token 到期前反代会自动续期`,
+          rows,
+        }],
+        menu,
+      };
+    },
+
+    async onAction(id, slotKey) {
+      selectRegion(regionKey);
+      if (id === 'quit') return { quit: true };
+
+      // 跳到另一个区域的界面：把终端交给它的 TUI，等它退出再回到这里，可以来回跳
+      if (id === 'jump') {
+        const target = otherRegion().key;
+        return {
+          suspend: async () => {
+            const args = target === 'global' ? ['global', 'tui'] : ['tui'];
+            // region 是从环境变量 WORKBUDDY_REGION 或首参数读的，而子进程会继承环境。
+            // 不把变量清干净的话，从国际版界面跳国内版会又开回国际版。
+            const env = { ...process.env };
+            if (target === 'global') env.WORKBUDDY_REGION = 'global';
+            else delete env.WORKBUDDY_REGION;
+            spawnSync(process.execPath, [__filename, ...args], { stdio: 'inherit', env });
+          },
+        };
+      }
+
+      // 添加账号会开浏览器并等上几分钟，必须把终端交出去，不然看不到登录提示
+      if (id === 'add') {
+        return {
+          suspend: async () => {
+            const r = runSelf(regionKey === 'global'
+              ? ['global', 'account', 'add']
+              : ['account', 'add'], { inherit: true });
+            if (!r.ok) throw new Error('添加未完成，可以重试');
+          },
+          after: '添加完成',
+        };
+      }
+
+      const arg = slotKey ? [slotKey] : [];
+      let r;
+      if (id === 'switch') r = runSelf(['account', ...arg]);
+      else if (id === 'remove') r = runSelf(['account', 'remove', ...arg]);
+      else if (id === 'renew') r = runSelf(['account', 'renew', ...arg]);
+      else if (id === 'restart') r = runSelf(['restart']);
+      else if (id === 'install') r = runSelf(['install-service']);
+      else if (id === 'doctor') r = runSelf(['doctor']);
+      else if (id === 'logs') r = runSelf(['logs', '300']);
+      else return { flash: `未知操作：${id}`, error: true };
+
+      if (id === 'logs') return { title: `日志 · ${REGION.title}`, body: r.out, error: !r.ok };
+      if (id === 'doctor' || !r.ok) {
+        return { title: `${id === 'doctor' ? '自检' : '输出'} · ${REGION.title}`, body: r.out, error: !r.ok };
+      }
+      return { flash: r.out.split('\n').filter(Boolean).slice(-1)[0] || '完成' };
+    },
+  };
+}
+
+async function tuiMain() {
+  const page = workbuddyPage(REGION.key);
+  await createTui({ ...page, title: page.title, subtitle: page.subtitle });
+}
+
 function usage() {
   console.log(`workbuddy2pi — WorkBuddy 反代运维命令
 
 用法：
-  workbuddy2pi status                 查看服务、端点、凭证与账号
-  workbuddy2pi start|stop|restart     控制常驻服务
-  workbuddy2pi logs [行数]            查看反代日志尾部（默认 40 行）
-  workbuddy2pi account                列出账号 slot
-  workbuddy2pi account <key>          切换到指定账号
-  workbuddy2pi account renew [key]    续期凭证（默认当前账号）
-  workbuddy2pi install-service        注册并启动常驻服务
-  workbuddy2pi uninstall-service      移除常驻服务
-  workbuddy2pi import-session [文件]  从 WorkBuddy 桌面端登录文件建档（不给路径则自动查找）
-  workbuddy2pi doctor                 依赖与接入自检（失败时退出码非零）
+  workbuddy2pi <命令> [参数]             国内版（端口 8787）
+  workbuddy2pi-global <命令> [参数]      国际版（端口 8788）
+  workbuddy2pi [global] <命令> [参数]    上面两种写法的等价形式，global 前缀留给脚本
+
+不带命令时进入交互界面（仅在真终端里；管道或重定向会退回纯文本 status）。
+两个区域的服务、账号 slot 与日志完全独立，可以同时在线。
+
+命令：
+  status                 查看服务、端点、凭证与账号
+  tui                    进入交互界面（不带命令时默认如此）
+  start|stop|restart     控制常驻服务
+  logs [行数]            查看反代日志尾部（默认 40 行）
+  account                列出账号 slot
+  account <key>          切换到指定账号
+  account add            添加账号（国际版走浏览器登录，国内版导入桌面端文件）
+  account remove <key>   删除账号（凭证留档为 <key>-removed-<日期>.json）
+  account renew [key]    续期凭证（默认当前账号）
+  login                  浏览器登录建档（与 account add 的国际版路径相同）
+  install-service        注册并启动常驻服务
+  uninstall-service      移除常驻服务
+  import-session [文件]  从桌面端登录文件建档（仅国内版可用）
+  doctor                 依赖与接入自检（失败时退出码非零）
+
+例：
+  workbuddy2pi                                国内版交互界面
+  workbuddy2pi-global                         国际版交互界面
+  workbuddy2pi account b                      切到国内版账号 b
+  workbuddy2pi-global account add             添加一个国际版账号（浏览器登录）
+  workbuddy2pi-global account a               切到国际版账号 a
+  workbuddy2pi-global status                  查看国际版状态（纯文本，适合脚本）
 
 供安装脚本调用（不宜手敲）：
-  workbuddy2pi check-session          生效凭证有效则退出码 0，否则 1
-  workbuddy2pi ensure-auth-key        保证 auth.json 里有 workbuddy 占位 key
+  check-session          生效凭证有效则退出码 0，否则 1
+  ensure-auth-key        保证 auth.json 里有 workbuddy 占位 key
 
 平台：macOS 用 launchd，Linux 用 systemd --user，Windows 用登录触发的计划任务。
-端口固定 ${PORT}，与 pi 扩展里的 baseUrl 保持一致。`);
+端口对应 pi 扩展里的 baseUrl：国内版 ${REGIONS.domestic.port} → provider workbuddy，
+国际版 ${REGIONS.global.port} → provider workbuddy-global。`);
 }
 
 async function main() {
   const argv = process.argv.slice(2);
+  // region 有两个来源：被 workbuddy2pi-global 调起时带的环境变量，或首参数的 global 子命令。
+  // 独立命令是给人用的，global 前缀留给脚本与旧习惯，两条都留。
+  if ((process.env.WORKBUDDY_REGION || '').toLowerCase() === 'global') selectRegion('global');
+  if ((argv[0] || '').toLowerCase() === 'global') {
+    selectRegion('global');
+    argv.shift();
+  }
+
+  // 不带子命令时进交互界面；管道或重定向时退回纯文本，避免把控制字符灌进文件
+  if (!argv.length && process.stdout.isTTY && process.stdin.isTTY) return tuiMain();
+
   const cmd = (argv[0] || 'status').toLowerCase();
 
   switch (cmd) {
+    case 'tui':
+      return tuiMain();
     case 'status':
       return cmdStatus();
     case 'start':
@@ -966,6 +1422,8 @@ async function main() {
       return uninstallService();
     case 'doctor':
       return cmdDoctor();
+    case 'login':
+      return cmdLogin();
     case 'import-session':
       return importSession(argv[1]);
     case 'check-session':
@@ -987,6 +1445,8 @@ async function main() {
         if (!key) fail('无法判定当前账号，请显式指定要续期的 key');
         return renewSlot(key);
       }
+      if (sub.toLowerCase() === 'add') return cmdAccountAdd();
+      if (['remove', 'rm', 'del'].includes(sub.toLowerCase())) return cmdAccountRemove(argv[2]);
       return switchTo(sub);
     }
     case '-h':
@@ -999,4 +1459,7 @@ async function main() {
   }
 }
 
-main().catch((e) => fail(e && e.stack ? e.stack : String(e)));
+// 被 require 时（总控 qodbuddy2pi）只导出页工厂与区域表，不执行命令行入口
+module.exports = { workbuddyPage, REGIONS };
+
+if (require.main === module) main().catch((e) => fail(e && e.stack ? e.stack : String(e)));

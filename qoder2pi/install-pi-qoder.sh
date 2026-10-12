@@ -34,8 +34,14 @@ log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m错误:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # provider 扩展用本仓库 assets/vendor 下的副本安装，不再从 npm 拉取
-VENDOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../assets/vendor" && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RES="$REPO/assets"
+VENDOR_DIR="$RES/vendor"
 VENDOR_QODER="$VENDOR_DIR/pi-provider-qoder"
+BIN_DIR="$HOME/.local/bin"
+
+[[ -f "$RES/qoder2pi" ]] || fail "缺少本仓库自带的运维命令：$RES/qoder2pi（请在完整仓库里运行本脚本）"
+[[ -f "$RES/tui.js" ]] || fail "缺少共享界面模块：$RES/tui.js"
 
 # ---------- 1. Node.js ----------
 if ! command -v node >/dev/null 2>&1; then
@@ -56,7 +62,34 @@ if ! command -v pi >/dev/null 2>&1; then
 fi
 log "Pi $(pi --version 2>/dev/null || echo '?')"
 
-# ---------- 3. qoder provider 扩展 ----------
+# ---------- 3. 运维命令 ----------
+log "安装运维命令 qoder2pi ..."
+mkdir -p "$BIN_DIR"
+install -m 755 "$RES/qoder2pi" "$BIN_DIR/qoder2pi"
+# 界面本体是 workbuddy2pi / qoder2pi / 安装向导共用的模块
+install -m 644 "$RES/tui.js" "$BIN_DIR/tui.js"
+log "已安装 $BIN_DIR/qoder2pi（运行 qoder2pi 进交互界面）"
+
+# 命令装到 ~/.local/bin 后不知道仓库在哪，把路径记下来供「更新扩展」用
+mkdir -p "$HOME/.qoder2pi"
+cat > "$HOME/.qoder2pi/config.json" <<JSON
+{
+  "repo": "$REPO",
+  "vendorQoder": "$VENDOR_QODER"
+}
+JSON
+log "已记录仓库路径到 $HOME/.qoder2pi/config.json"
+
+# 总控界面把三个命令当成页面拼起来，需要同目录下的 qoder2pi 与 workbuddy2pi。
+# 两个安装脚本都会尝试部署它，先跑的那个如果还缺对方就先跳过。
+if [[ -f "$RES/qodbuddy2pi" && -f "$BIN_DIR/workbuddy2pi" ]]; then
+  install -m 755 "$RES/qodbuddy2pi" "$BIN_DIR/qodbuddy2pi"
+  log "已安装 $BIN_DIR/qodbuddy2pi（三个 provider 的总控界面）"
+else
+  warn "暂未安装 qodbuddy2pi：等 workbuddy2pi 也装好后重跑本脚本，或在仓库根目录跑 ./qodbuddy"
+fi
+
+# ---------- 4. qoder provider 扩展 ----------
 # 本地路径安装时 `pi list` 显示的是该路径，而路径末段就是包名，所以下面的判定依然成立
 [[ -f "$VENDOR_QODER/package.json" ]] \
   || fail "缺少本仓库自带的 qoder 扩展：$VENDOR_QODER（请在完整仓库里运行本脚本）"
@@ -67,7 +100,7 @@ else
   pi install "$VENDOR_QODER"
 fi
 
-# ---------- 4. 登录 ----------
+# ---------- 5. 登录 ----------
 if [[ -s "$HOME/.pi/agent/auth.json" ]] \
    && grep -q "$PROVIDER" "$HOME/.pi/agent/auth.json" 2>/dev/null; then
   log "检测到已有的 $PROVIDER 登录凭据，跳过登录"
@@ -91,7 +124,7 @@ else
   exit 0
 fi
 
-# ---------- 5. 验证 ----------
+# ---------- 6. 验证 ----------
 log "验证模型列表..."
 sleep 1
 if pi --list-models 2>/dev/null | grep -q "^qoder"; then
@@ -101,6 +134,11 @@ if pi --list-models 2>/dev/null | grep -q "^qoder"; then
   log "完成!启动方式:"
   echo "  pi --provider $PROVIDER --model <模型ID>"
   echo "  或进入 pi 后用 /model 选择 qoder 下的模型"
+  echo
+  echo "日常维护（不带参数即进交互界面）："
+  echo "  qoder2pi                查看两个区域的登录状态与操作菜单"
+  echo "  qoder2pi login cn pt-xx 用 PAT 登录国内版"
+  echo "  qoder2pi doctor         自检"
 else
   fail "qoder 模型未出现。请运行 pi 后输入 /login $PROVIDER 手动登录,再重试"
 fi

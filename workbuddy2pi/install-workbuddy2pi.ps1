@@ -24,17 +24,27 @@
 .PARAMETER NoService
   只装接入, 不注册计划任务。之后可运行 workbuddy2pi install-service 注册。
 
+.PARAMETER Global
+  同时接入国际版 (端口 8788, provider workbuddy-global)。
+  国际版只能走浏览器登录: 桌面端落盘的 token 是加密对象, 导入也没法用。
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File install-workbuddy2pi.ps1
 
 .EXAMPLE
   .\install-workbuddy2pi.ps1 -NoService
+
+.EXAMPLE
+  .\install-workbuddy2pi.ps1 -Global
 #>
 param(
-  [switch]$NoService
+  [switch]$NoService,
+  [switch]$Global
 )
 
 $ErrorActionPreference = "Stop"
+# 用 PSBoundParameters 取值而不直接引用 $Global, 避免与 PowerShell 的 global 作用域混淆
+$WithGlobal = $PSBoundParameters['Global'] -eq $true
 
 $Here     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Res      = Join-Path (Split-Path -Parent $Here) "assets"
@@ -112,11 +122,16 @@ if ($uvCmd) {
 Write-Step "uv $(& $Uv --version)"
 
 # ---------- 4. 运维命令 ----------
-Write-Section "4 安装运维命令 workbuddy2pi"
+Write-Section "4 安装运维命令"
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 Copy-Item -Force $Ops (Join-Path $BinDir "workbuddy2pi")
 Copy-Item -Force (Join-Path $Res "workbuddy2pi.cmd") (Join-Path $BinDir "workbuddy2pi.cmd")
-Write-Step "已安装 $BinDir\workbuddy2pi.cmd"
+# 国际版入口与国内版共用同一份实现, 只是把 region 固定下来; 这几个文件必须在同一目录
+Copy-Item -Force (Join-Path $Res "workbuddy2pi-global") (Join-Path $BinDir "workbuddy2pi-global")
+Copy-Item -Force (Join-Path $Res "workbuddy2pi-global.cmd") (Join-Path $BinDir "workbuddy2pi-global.cmd")
+# 界面本体抽成了共享模块, qoder2pi 与安装向导也用它; 几个命令必须能找到这个文件
+Copy-Item -Force (Join-Path $Res "tui.js") (Join-Path $BinDir "tui.js")
+Write-Step "已安装 $BinDir\workbuddy2pi.cmd、workbuddy2pi-global.cmd 与共享的 tui.js"
 
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($userPath -notlike "*$BinDir*") {
@@ -136,6 +151,16 @@ if ((Test-Path $WbAccount) -and ((Get-Content $WbAccount -Raw) -notmatch "workbu
 }
 "@echo off`r`n`"%~dp0workbuddy2pi.cmd`" %*`r`n" | Set-Content -Path $WbAccount -Encoding ASCII
 Write-Step "wb-account.cmd 已转发到 workbuddy2pi (旧习惯的命令仍可用)"
+
+# 总控界面把三个命令当成页面拼起来, 需要同目录下的 workbuddy2pi 与 qoder2pi。
+# 两个安装脚本都会尝试部署它, 先跑的那个如果还缺对方就先跳过。
+if (Test-Path (Join-Path $BinDir "qoder2pi.cmd")) {
+  Copy-Item -Force (Join-Path $Res "qodbuddy2pi") (Join-Path $BinDir "qodbuddy2pi")
+  Copy-Item -Force (Join-Path $Res "qodbuddy2pi.cmd") (Join-Path $BinDir "qodbuddy2pi.cmd")
+  Write-Step "已安装 $BinDir\qodbuddy2pi.cmd (三个 provider 的总控界面)"
+} else {
+  Write-Warn "暂未安装 qodbuddy2pi: 等 qoder2pi 也装好后重跑本脚本, 或在仓库根目录跑 qodbuddy"
+}
 
 # ---------- 5. vendored 依赖 ----------
 Write-Section "5 部署本仓库自带的依赖"
@@ -166,8 +191,8 @@ Write-Step "已安装 $ExtTarget"
 
 $authAction = & node $Ops ensure-auth-key
 switch ($authAction) {
-  "added"   { Write-Step "已在 auth.json 写入 workbuddy 占位 key (原文件已备份为 auth.json.bak)" }
-  "present" { Write-Step "auth.json 已有 workbuddy key" }
+  "added"   { Write-Step "已在 auth.json 写入两个 provider 的占位 key (原文件已备份为 auth.json.bak)" }
+  "present" { Write-Step "auth.json 已有两个 provider 的占位 key" }
   default   { Write-Fail "写入 auth.json 失败: $authAction" }
 }
 
@@ -217,18 +242,50 @@ if ($NoService) {
   if ($LASTEXITCODE -ne 0) { Write-Fail "注册计划任务失败" }
 }
 
-# ---------- 9. 自检 ----------
-Write-Section "9 自检"
+# ---------- 9. 国际版 (-Global 时) ----------
+if ($WithGlobal) {
+  Write-Section "9 配置 WorkBuddy 国际版"
+  # 国际版只能走浏览器登录: 桌面端落盘的 token 是 {$wbEncrypted:...} 加密对象,
+  # 反代会把它当字符串拼进 Authorization 头, 导入出来的账号每个请求都 401。
+  node $Ops global check-session
+  if ($LASTEXITCODE -eq 0) {
+    Write-Step "已有有效的国际版凭证, 跳过登录"
+  } else {
+    Write-Step "需要在浏览器里登录一个国际版账号"
+    node $Ops global login
+    if ($LASTEXITCODE -ne 0) { Write-Fail "国际版登录未完成或超时, 可重试: workbuddy2pi global login" }
+  }
+  & $OpsCmd global install-service
+  if ($LASTEXITCODE -ne 0) { Write-Fail "注册国际版计划任务失败" }
+}
+
+# ---------- 10. 自检 ----------
+Write-Section "10 自检"
 Start-Sleep -Seconds 3
 & $OpsCmd doctor
 if ($LASTEXITCODE -ne 0) { Write-Fail "自检未通过, 请按上面的提示逐项处理" }
+if ($WithGlobal) {
+  & $OpsCmd global doctor
+  if ($LASTEXITCODE -ne 0) { Write-Fail "国际版自检未通过, 请按上面的提示逐项处理" }
+}
 
 Write-Host ""
-Write-Step "完成! 在 pi 里用 /model 选择 workbuddy 下的模型, 或:"
-Write-Host "  pi --provider workbuddy --model deepseek-v4.1-flash"
+Write-Step "完成! 在 pi 里用 /model 选择模型, 或:"
+Write-Host "  pi --provider workbuddy --model deepseek-v4.1-flash        国内版"
+if ($WithGlobal) {
+  Write-Host "  pi --provider workbuddy-global --model claude-4.0          国际版"
+}
 Write-Host ""
 Write-Host "日常维护:"
-Write-Host "  workbuddy2pi status            查看服务与账号"
-Write-Host "  workbuddy2pi account b         切换到第二个账号"
+Write-Host "  workbuddy2pi status            查看国内版服务与账号"
+Write-Host "  workbuddy2pi account b         切换到国内版第二个账号"
+Write-Host "  workbuddy2pi account add       添加账号 (国际版走浏览器登录)"
+Write-Host "  workbuddy2pi account remove b  删除账号"
 Write-Host "  workbuddy2pi account renew     续期凭证"
 Write-Host "  workbuddy2pi logs              查看反代日志"
+if ($WithGlobal) {
+  Write-Host "  workbuddy2pi-global              国际版交互界面"
+  Write-Host "  workbuddy2pi-global account add  再添加一个国际版账号"
+} else {
+  Write-Host "  (要接入国际版: .\install-workbuddy2pi.ps1 -Global)"
+}

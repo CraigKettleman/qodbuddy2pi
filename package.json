@@ -1,0 +1,52 @@
+{
+  "name": "qodbuddy2pi",
+  "version": "1.0.0",
+  "description": "把 Qoder 与 WorkBuddy（国内版 / 国际版）的订阅接入 pi coding agent，并提供一个总控 TUI",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "qoder",
+    "workbuddy",
+    "codebuddy",
+    "provider",
+    "tui"
+  ],
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "qodbuddy2pi": "assets/qodbuddy2pi",
+    "qoder2pi": "assets/qoder2pi",
+    "workbuddy2pi": "assets/workbuddy2pi",
+    "workbuddy2pi-global": "assets/workbuddy2pi-global"
+  },
+  "files": [
+    "assets/",
+    "qoder2pi/install-pi-qoder.sh",
+    "qoder2pi/install-pi-qoder.ps1",
+    "qoder2pi/README.md",
+    "workbuddy2pi/install-workbuddy2pi.sh",
+    "workbuddy2pi/install-workbuddy2pi.ps1",
+    "workbuddy2pi/README.md",
+    "qodbuddy",
+    "qodbuddy.cmd",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {},
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CraigKettleman/qoder2pi.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CraigKettleman/qoder2pi/issues"
+  },
+  "homepage": "https://github.com/CraigKettleman/qoder2pi#readme"
+}

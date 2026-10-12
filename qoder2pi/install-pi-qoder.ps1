@@ -44,6 +44,16 @@ function Write-Step($msg)  { Write-Host "==> $msg" -ForegroundColor Green }
 function Write-Fail($msg)  { Write-Host "错误: $msg" -ForegroundColor Red; exit 1 }
 
 # ---------- 区域配置 ----------
+$Res     = Join-Path (Split-Path -Parent $PSScriptRoot) "assets"
+$BinDir  = Join-Path $HOME ".local\bin"
+
+if (-not (Test-Path (Join-Path $Res "qoder2pi"))) {
+  Write-Fail "缺少本仓库自带的运维命令: $Res\qoder2pi (请在完整仓库里运行本脚本)"
+}
+if (-not (Test-Path (Join-Path $Res "tui.js"))) {
+  Write-Fail "缺少共享界面模块: $Res\tui.js"
+}
+
 if ($Region -eq "cn") {
   $PatEnv   = "QODERCN_API_KEY"
   $PatPage  = "https://qoder.com.cn/account/integrations"
@@ -83,8 +93,36 @@ if (-not $pi) {
 }
 Write-Step "Pi $(pi --version 2>$null)"
 
-# ---------- 3. qoder provider 扩展 ----------
-# provider 扩展用本仓库 assets/vendor 下的副本安装，不再从 npm 拉取
+# ---------- 3. 运维命令 ----------
+Write-Step "安装运维命令 qoder2pi ..."
+New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+Copy-Item -Force (Join-Path $Res "qoder2pi") (Join-Path $BinDir "qoder2pi")
+Copy-Item -Force (Join-Path $Res "qoder2pi.cmd") (Join-Path $BinDir "qoder2pi.cmd")
+# 界面本体是 workbuddy2pi / qoder2pi / 安装向导共用的模块
+Copy-Item -Force (Join-Path $Res "tui.js") (Join-Path $BinDir "tui.js")
+Write-Step "已安装 $BinDir\qoder2pi.cmd (运行 qoder2pi 进交互界面)"
+
+# 命令装到 ~/.local/bin 后不知道仓库在哪, 把路径记下来供「更新扩展」用
+$CfgDir = Join-Path $HOME ".qoder2pi"
+New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null
+$RepoPath = Split-Path -Parent $PSScriptRoot
+@{
+  repo        = $RepoPath
+  vendorQoder = Join-Path $RepoPath "assets\vendor\pi-provider-qoder"
+} | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $CfgDir "config.json")
+Write-Step "已记录仓库路径到 $CfgDir\config.json"
+
+# 总控界面把三个命令当成页面拼起来, 需要同目录下的 qoder2pi 与 workbuddy2pi。
+# 两个安装脚本都会尝试部署它, 先跑的那个如果还缺对方就先跳过。
+if ((Test-Path (Join-Path $Res "qodbuddy2pi")) -and (Test-Path (Join-Path $BinDir "workbuddy2pi.cmd"))) {
+  Copy-Item -Force (Join-Path $Res "qodbuddy2pi") (Join-Path $BinDir "qodbuddy2pi")
+  Copy-Item -Force (Join-Path $Res "qodbuddy2pi.cmd") (Join-Path $BinDir "qodbuddy2pi.cmd")
+  Write-Step "已安装 $BinDir\qodbuddy2pi.cmd (三个 provider 的总控界面)"
+} else {
+  Write-Warn "暂未安装 qodbuddy2pi: 等 workbuddy2pi 也装好后重跑本脚本, 或在仓库根目录跑 qodbuddy"
+}
+
+# ---------- 4. qoder provider 扩展 ----------
 $VendorQoder = Join-Path (Split-Path -Parent $PSScriptRoot) "assets\vendor\pi-provider-qoder"
 if (-not (Test-Path (Join-Path $VendorQoder "package.json"))) {
   Write-Fail "缺少本仓库自带的 qoder 扩展: $VendorQoder (请在完整仓库里运行本脚本)"
@@ -97,7 +135,7 @@ if ($piList -match "pi-provider-qoder") {
   pi install $VendorQoder
 }
 
-# ---------- 4. 登录 ----------
+# ---------- 5. 登录 ----------
 $authFile = Join-Path $HOME ".pi\agent\auth.json"
 $hasAuth  = (Test-Path $authFile) -and ((Get-Content $authFile -Raw -ErrorAction SilentlyContinue) -match "qoder")
 
@@ -121,7 +159,7 @@ if ($hasAuth) {
   exit 0
 }
 
-# ---------- 5. 验证 ----------
+# ---------- 6. 验证 ----------
 Write-Step "验证模型列表..."
 Start-Sleep -Seconds 1
 $models = (pi --list-models 2>$null | Out-String)
@@ -134,6 +172,11 @@ if ($lines.Count -gt 0) {
   Write-Step "完成! 启动方式:"
   Write-Host "  pi --provider $Provider --model <模型ID>"
   Write-Host "  或进入 pi 后用 /model 选择 qoder 下的模型"
+  Write-Host ""
+  Write-Host "日常维护 (不带参数即进交互界面):"
+  Write-Host "  qoder2pi                查看两个区域的登录状态与操作菜单"
+  Write-Host "  qoder2pi login cn pt-xx 用 PAT 登录国内版"
+  Write-Host "  qoder2pi doctor         自检"
 } else {
   Write-Fail "qoder 模型未出现。请运行 pi 后输入 /login $Provider 手动登录, 再重试"
 }

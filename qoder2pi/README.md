@@ -2,7 +2,11 @@
 
 把 Qoder 订阅额度接入 Pi Coding Agent：自动安装 Pi 与 qoder provider 扩展并登录，完成后即可用 Qoder 模型。
 
+装完之后有一个运维命令 `qoder2pi`：不带参数运行就是全屏交互界面，能看到两个区域各自的登录状态，并完成登录、退出登录、更新扩展、自检等操作。
+
 前置要求：**Node.js 18+**。
+
+> 不想记参数的话，在仓库根目录跑 `./qodbuddy`，它把本仓库四份安装脚本（Qoder 两份、WorkBuddy 两份）收进一个菜单。
 
 ## 1. 获取 PAT
 
@@ -38,11 +42,29 @@ powershell -ExecutionPolicy Bypass -File install-pi-qoder.ps1 pt-xxxxxx -Region 
 
 ## 脚本会做什么
 
-依次：检查/安装 Node.js → 安装 Pi → 安装 `pi-provider-qoder` 扩展 → 登录（已有凭据自动跳过 / PAT 自动登录 / 打印手动步骤）→ 验证模型列表出现 `qoder` 模型。
+依次：检查/安装 Node.js → 安装 Pi → 安装运维命令 `qoder2pi` → 安装 `pi-provider-qoder` 扩展 → 登录（已有凭据自动跳过 / PAT 自动登录 / 打印手动步骤）→ 验证模型列表出现 `qoder` 模型。
 
 扩展从**本仓库自带的副本**安装（`../assets/vendor/pi-provider-qoder`），不再从 npm 拉取，因此不受上游发版或下架影响。该副本的版本、校验值与许可见 [../assets/vendor/README.md](../assets/vendor/README.md)。
+安装时还会把仓库路径写进 `~/.qoder2pi/config.json`，因为运维命令装到 `~/.local/bin` 后就不知道仓库在哪了。
 
 > 版本说明：0.4.6 修复了与 pi ≥ 0.86 的上下文兼容问题——旧版读不到折叠进首条 system 消息的系统提示词与工具声明，导致请求丢失上下文、模型表现为“没有工具/不能联网”。请确保副本不低于该版本。
+
+## 日常使用
+
+```bash
+qoder2pi                        # 进交互界面（推荐）
+qoder2pi status                 # 纯文本：pi、扩展与两个区域的登录状态
+qoder2pi login cn pt-xxxxxx     # 用 PAT 登录国内版
+qoder2pi login global           # 不给 PAT 时打印手动步骤与获取地址
+qoder2pi logout cn              # 退出登录（auth.json 会先备份）
+qoder2pi install-extension      # 从本仓库副本重装扩展
+qoder2pi models                 # 列出两个区域在 pi 里可见的模型
+qoder2pi doctor                 # 自检
+```
+
+Qoder 与 WorkBuddy 不同：它没有本机反代服务，凭证直接存在 pi 的 `~/.pi/agent/auth.json`，
+所以没有端口、服务、账号切换这类操作。两个区域（国内版 `qoder-cn`、国际版 `qoder`）
+是并存的，不需要二选一。
 
 ## 登录未生效怎么办
 
