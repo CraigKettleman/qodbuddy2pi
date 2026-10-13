@@ -16,7 +16,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const readline = require('readline');
-const { spawnSync } = require('child_process');
+const { spawnSync, execFile } = require('child_process');
 const { createTui, C, G, findCmd } = require('./tui');
 
 const HOME = os.homedir();
@@ -121,12 +121,62 @@ function loginState(region) {
   return { loggedIn: true, note: `已登录（${who}，access 剩 ${days} 天）` };
 }
 
-/** pi 里该 provider 的模型行；pi 不可用时返回 null。 */
-function listModels(region) {
+/** 异步版子进程：界面刷新用。同步版会阻塞事件循环，把界面冻住。 */
+function runAsync(cmd, args, opts = {}) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { encoding: 'utf8', timeout: opts.timeout || 60000, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
+      resolve({
+        status: error ? -1 : 0,
+        stdout: (stdout || '').trim(),
+        stderr: (stderr || '').trim(),
+        error,
+      });
+    });
+  });
+}
+
+/**
+ * 一次拿到两个 provider 的模型行，按 provider 分组。
+ *
+ * pi --list-models 要跑 0.6 秒左右，而它的输出本来同时包含两个区域；
+ * 之前每个区域各调一次，等于白花一倍时间。
+ */
+function listAllModels() {
   if (!hasPi()) return null;
   const r = run('pi', ['--list-models'], { timeout: 180000 });
   if (r.status !== 0) return null;
-  return r.stdout.split('\n').filter((l) => l.startsWith(`${region.provider} `));
+  const out = { cn: [], global: [] };
+  for (const line of r.stdout.split('\n')) {
+    if (line.startsWith('qoder-cn ')) out.cn.push(line);
+    else if (line.startsWith('qoder ')) out.global.push(line);
+  }
+  return out;
+}
+
+/** 异步、不阻塞事件循环的版本；界面刷新用这个，否则界面会冻住。 */
+async function listAllModelsAsync() {
+  const [version, listed, models] = await Promise.all([
+    runAsync('pi', ['--version']),
+    runAsync('pi', ['list']),
+    runAsync('pi', ['--list-models'], { timeout: 180000 }),
+  ]);
+  const out = { cn: [], global: [], version: version.stdout, extension: listed.stdout.includes('pi-provider-qoder') };
+  if (models.status === 0) {
+    for (const line of models.stdout.split('\n')) {
+      if (line.startsWith('qoder-cn ')) out.cn.push(line);
+      else if (line.startsWith('qoder ')) out.global.push(line);
+    }
+  } else {
+    return null;
+  }
+  return out;
+}
+
+/** pi 里该 provider 的模型行；pi 不可用时返回 null。 */
+function listModels(region) {
+  const all = listAllModels();
+  if (all === null) return null;
+  return all[region.key === 'cn' ? 'cn' : 'global'];
 }
 
 function extensionPath() {
@@ -301,9 +351,11 @@ const qoderPage = {
   subtitle: `pi 的 qoder-cn（国内版）与 qoder（国际版）　·　凭证在 ~/.pi/agent/auth.json`,
 
   async refresh() {
+    // 三个 pi 调用并行跑，且不阻塞事件循环；否则界面会在刷新期间冻住
+    const all = await listAllModelsAsync();
     const rows = Object.values(REGIONS).map((region) => {
       const st = loginState(region);
-      const models = listModels(region);
+      const models = all === null ? null : all[region.key === 'cn' ? 'cn' : 'global'];
       return {
         key: region.key,
         label: `${region.title}  ${region.provider}`,
@@ -314,8 +366,8 @@ const qoderPage = {
 
     return {
       status: [
-        ['pi', hasPi() ? `${C.green}${G.ok}${C.reset} ${run('pi', ['--version']).stdout || '可用'}` : `${C.red}${G.bad}${C.reset} 未找到`],
-        ['扩展', extensionInstalled()
+        ['pi', all && all.version ? `${C.green}${G.ok}${C.reset} ${all.version}` : `${C.red}${G.bad}${C.reset} 未找到`],
+        ['扩展', all && all.extension
           ? `${C.green}${G.ok}${C.reset} pi-provider-qoder 已安装`
           : `${C.yellow}${G.idle}${C.reset} 未安装（执行「更新扩展」）`],
         ['凭证', fs.existsSync(AUTH_JSON) ? `${C.green}${G.ok}${C.reset} ${AUTH_JSON}` : `${C.red}${G.bad}${C.reset} 不存在`],

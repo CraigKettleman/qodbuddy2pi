@@ -12,4 +12,6 @@
 
 process.env.WORKBUDDY_REGION = 'global';
 
-require(require('node:path').join(__dirname, 'workbuddy2pi'));
+// 主脚本被 require 时不会自动跑命令行入口（那样总控一 require 就会变成 CLI），
+// 所以这里显式调它的入口。
+require(require('node:path').join(__dirname, 'workbuddy2pi')).runCli();

@@ -1459,7 +1459,12 @@ async function main() {
   }
 }
 
-// 被 require 时（总控 qodbuddy2pi）只导出页工厂与区域表，不执行命令行入口
-module.exports = { workbuddyPage, REGIONS };
+// 被 require 时不自动执行命令行入口，否则总控 qodbuddy2pi 一 require 就会把
+// 自己的进程变成 CLI。要执行入口的 wrapper（workbuddy2pi-global）显式调 runCli()。
+function runCli() {
+  main().catch((e) => fail(e && e.stack ? e.stack : String(e)));
+}
 
-if (require.main === module) main().catch((e) => fail(e && e.stack ? e.stack : String(e)));
+module.exports = { workbuddyPage, REGIONS, runCli };
+
+if (require.main === module) runCli();

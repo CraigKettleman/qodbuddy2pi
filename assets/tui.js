@@ -216,6 +216,7 @@ function createTui(options) {
     flash: '',
     error: false,
     busy: '',
+    loading: false,
     active: false,
     // 多页：pages 为空时就是单页界面（workbuddy2pi / qoder2pi 照旧），
     // 给了 pages 才在标题上方画页签，用 1..9 或 Tab 切换
@@ -295,6 +296,7 @@ function createTui(options) {
       : (options.footer || `←→/Tab 切换　↑↓ 选择　Enter 执行　r 刷新　q 退出`);
     lines.push(`  ${C.dim}${hints}${C.reset}`);
     if (state.busy) lines.push(`  ${C.yellow}${state.busy}${C.reset}`);
+    else if (state.loading) lines.push(`  ${C.dim}正在读取…${C.reset}`);
     else if (state.flash) lines.push(`  ${state.error ? C.yellow : C.green}${state.flash}${C.reset}`);
 
     return lines;
@@ -380,14 +382,31 @@ function createTui(options) {
     // 有 pages 时数据来自当前页，没 pages 时就是 options 本身（单页用法）
     const page = state.pages[state.page];
     const src = page || options;
-    const data = await (page ? page.refresh() : options.refresh());
-    state.title = page ? (state.pages[state.page].title || page.label) : options.title;
-    state.subtitle = page ? (page.subtitle || '') : (options.subtitle || '');
-    state.status = data.status || [];
-    state.sections = data.sections || [];
-    state.menuItems = (data.menu || []).map(Object.freeze);
-    if (data.footer) src.footer = data.footer;
-    if (state.menu >= state.menuItems.length) state.menu = 0;
+    const token = (state.refreshToken = (state.refreshToken || 0) + 1);
+    // 取数可能花几百毫秒（要跑 pi 之类的子进程）。先画一帧「正在读取」：
+    // 渲染只要几微秒，但换来的是一按就有反应；否则屏幕一动不动，
+    // 用户会以为按键没生效而反复敲。
+    // 用 loading 而不是 busy：读取期间应该还能切页、按 q 退出，
+    // 只有真正在执行操作（act）时才阻止输入。
+    if (state.active) {
+      state.loading = true;
+      render();
+    }
+    try {
+      const data = await (page ? page.refresh() : options.refresh());
+      // 读取期间用户可能又切了页（那时不会阻塞）；旧结果回来时直接丢弃，
+      // 否则它会把新页面的内容覆盖掉。
+      if (token !== state.refreshToken) return;
+      state.title = page ? (state.pages[state.page].title || page.label) : options.title;
+      state.subtitle = page ? (page.subtitle || '') : (options.subtitle || '');
+      state.status = data.status || [];
+      state.sections = data.sections || [];
+      state.menuItems = (data.menu || []).map(Object.freeze);
+      if (data.footer) src.footer = data.footer;
+      if (state.menu >= state.menuItems.length) state.menu = 0;
+    } finally {
+      if (token === state.refreshToken) state.loading = false;
+    }
   }
 
   /** 切到第 i 页；页号越界则不动。 */
@@ -461,7 +480,42 @@ function createTui(options) {
     render();
   }
 
-  async function onKey(key) {
+  /**
+   * 把一次 stdin 读到的内容拆成交互 token。
+   *
+   * 终端会把连续按键合并成一个 data 事件（快速连按、粘贴、按住方向键都算），
+   * 而 onKey 是按单个按键判断的：方向键要先整段识别，剩下的才逐字符切，
+   * 否则 'q' 这种单字符判断永远不成立，整批按键被静默丢掉。
+   */
+  function splitKeys(data) {
+    const out = [];
+    let i = 0;
+    while (i < data.length) {
+      // 转义序列：\x1b[ 后跟参数与终止字母，整段算一个键（如 \x1b[A、\x1b[5~）
+      if (data[i] === '\x1b' && data[i + 1] === '[') {
+        const m = /^\x1b\[[0-9;?]*[a-zA-Z~]/.exec(data.slice(i));
+        if (m) {
+          out.push(m[0]);
+          i += m[0].length;
+          continue;
+        }
+      }
+      // 单个 \x1b 本身就是 Esc
+      out.push(data[i]);
+      i += 1;
+    }
+    return out;
+  }
+
+  async function onKey(data) {
+    // 一次可能收到多个按键，逐个处理，不能只取第一个
+    for (const key of splitKeys(String(data))) {
+      await handleKey(key);
+      if (!state.active) return; // 中途退出了
+    }
+  }
+
+  async function handleKey(key) {
     if (!state.active || state.busy) return;
 
     if (key === '\x03') return quit(); // Ctrl+C
