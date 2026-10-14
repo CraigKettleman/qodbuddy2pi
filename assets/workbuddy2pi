@@ -24,13 +24,12 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { spawnSync } = require('child_process');
+const { C, G, findCmd, resolveSpawn, readJson, AUTH_JSON, DATA_DIR } = require('./tui');
 
 const HOME = os.homedir();
-const DATA_DIR = path.join(HOME, '.workbuddy2api');
 const VENDOR_DIR = path.join(DATA_DIR, 'vendor');
 const ACCOUNTS_LIB = path.join(HOME, '.wb-switch', 'accounts.json');
 const EXTENSION = path.join(HOME, '.pi', 'agent', 'extensions', 'workbuddy.ts');
-const AUTH_JSON = path.join(HOME, '.pi', 'agent', 'auth.json');
 
 const IS_MAC = process.platform === 'darwin';
 const IS_LINUX = process.platform === 'linux';
@@ -82,8 +81,6 @@ const REGIONS = {
     slotsDir: path.join(DATA_DIR, 'sessions'),
     logDir: DATA_DIR,
     endpoint: 'https://copilot.tencent.com',
-    // 桌面端落盘的登录文件：国内版不带后缀，国际版带 -ai
-    desktopInfoName: /^workbuddy-desktop\.info$/,
     proxyArgs: [],
   }),
   global: defineRegion({
@@ -97,7 +94,6 @@ const REGIONS = {
     // 反代 2.0.6 的国际版默认端点是 www.codebuddy.ai；本项目实际使用的是
     // workbuddy.ai（账号自身的 domain 也是它），所以显式覆盖。
     endpoint: 'https://www.workbuddy.ai',
-    desktopInfoName: /^workbuddy-desktop-ai\.info$/,
     proxyArgs: ['--global', '--endpoint', 'https://www.workbuddy.ai'],
   }),
 };
@@ -144,8 +140,16 @@ const fail = (m) => {
 
 // ---------------------------------------------------------------- 基础工具
 
+/** 同步睡眠。用 Atomics.wait 而不是拉外部 timeout/sleep 命令：跨平台且不过 shell。 */
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function run(cmd, args, opts = {}) {
-  const result = spawnSync(cmd, args, {
+  // Windows 上 pi 是 pi.cmd（npm 的 shim），Node 不允许直接 spawn .cmd，
+  // resolveSpawn 会把它包成 cmd.exe /c；uv.exe / schtasks.exe 原样返回。
+  const sp = resolveSpawn(cmd, args);
+  const result = spawnSync(sp.cmd, sp.args, {
     encoding: 'utf8',
     timeout: opts.timeout || 60000,
     ...opts,
@@ -156,14 +160,6 @@ function run(cmd, args, opts = {}) {
     stderr: (result.stderr || '').trim(),
     error: result.error,
   };
-}
-
-function readJson(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
 }
 
 function writeFileTight(file, content) {
@@ -434,14 +430,20 @@ function windowsServeCmd(uv, wheel) {
   const logFile = path.join(regionLogDir(), 'codebuddy-proxy.jsonl');
   const stdout = path.join(regionLogDir(), 'proxy-stdout.log');
   // 计划任务不会在崩溃后重启进程，所以用循环做 keep-alive。
-  return `@echo off
-rem 由 workbuddy2pi install-service 生成，请勿手工编辑。
-setlocal
-:loop
-"${uv}" run --with "${wheel}" python -m codebuddy_proxy --host 127.0.0.1 --port ${PORT}${proxyArgsInline()} --desensitize --log-file "${logFile}" >> "${stdout}" 2>&1
-timeout /t 15 /nobreak >nul
-goto loop
-`;
+  //
+  // 行尾必须是 CRLF：cmd.exe 解析只有 LF 的 .bat/.cmd 时，goto 找标签会失败
+  // （“The system cannot find the batch label specified”），keep-alive 直接失效。
+  const body = [
+    '@echo off',
+    'rem 由 workbuddy2pi install-service 生成，请勿手工编辑。',
+    'setlocal',
+    ':loop',
+    `"${uv}" run --with "${wheel}" python -m codebuddy_proxy --host 127.0.0.1 --port ${PORT}${proxyArgsInline()} --desensitize --log-file "${logFile}" >> "${stdout}" 2>&1`,
+    'timeout /t 15 /nobreak >nul',
+    'goto loop',
+    '',
+  ];
+  return body.join('\r\n');
 }
 
 function installService() {
@@ -547,7 +549,9 @@ function restartService() {
     if (r.status !== 0) fail(`systemctl restart 失败：${r.stderr || r.stdout}`);
   } else {
     run('schtasks', ['/End', '/TN', TASK]);
-    run('timeout', ['/t', '1', '/nobreak'], { shell: true });
+    // 计划任务停掉后端口释放要一点时间。用 Atomics.wait 同步睡 1 秒，
+    // 不拉 timeout.exe（那只在 Windows 上有，还得过 shell）。
+    sleepMs(1000);
     const r = run('schtasks', ['/Run', '/TN', TASK]);
     if (r.status !== 0) fail(`schtasks /Run 失败：${r.stderr || r.stdout}`);
   }
@@ -571,7 +575,9 @@ async function health() {
     if (!r.json || !Array.isArray(r.json.models)) {
       return { ok: false, note: '响应结构不是预期的模型列表' };
     }
-    return { ok: true, models: r.json.models.length };
+    // 同时留下 id 列表：查看模型要展示它们，不只是数量
+    const ids = r.json.models.map((m) => (m && (m.id || m.name)) || String(m)).filter(Boolean);
+    return { ok: true, models: r.json.models.length, ids };
   } catch (e) {
     return { ok: false, note: e.code || e.message || String(e) };
   }
@@ -809,51 +815,6 @@ function currentMachineId() {
   return fromSlot ? fromSlot.data.machineId : computeMachineId();
 }
 
-/** 有界搜索 WorkBuddy 桌面端落盘的登录文件（按当前 region 选择文件名）。 */
-function findDesktopInfo() {
-  const authDir = path.join(HOME, 'Library', 'Application Support', 'CodeBuddyExtension',
-    'Data', 'Public', 'auth');
-  const named = [
-    path.join(authDir, REGION.key === 'global' ? 'workbuddy-desktop-ai.info' : 'workbuddy-desktop.info'),
-  ];
-  for (const p of named) if (fs.existsSync(p)) return p;
-
-  const roots = [];
-  if (IS_WIN) {
-    if (process.env.APPDATA) roots.push(process.env.APPDATA);
-    if (process.env.LOCALAPPDATA) roots.push(process.env.LOCALAPPDATA);
-  } else if (IS_LINUX) {
-    roots.push(path.join(HOME, '.config'));
-    roots.push(path.join(HOME, '.local', 'share'));
-  }
-
-  const SKIP = new Set(['node_modules', 'Cache', 'CachedData', 'GPUCache', 'logs', '.git']);
-  const findIn = (dir, depth) => {
-    if (depth > 5) return null;
-    let entries;
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return null;
-    }
-    for (const e of entries) {
-      if (e.isFile() && REGION.desktopInfoName.test(e.name)) return path.join(dir, e.name);
-    }
-    for (const e of entries) {
-      if (!e.isDirectory() || SKIP.has(e.name) || e.name.startsWith('.')) continue;
-      const hit = findIn(path.join(dir, e.name), depth + 1);
-      if (hit) return hit;
-    }
-    return null;
-  };
-  for (const root of roots) {
-    if (!fs.existsSync(root)) continue;
-    const hit = findIn(root, 0);
-    if (hit) return hit;
-  }
-  return null;
-}
-
 function nextSlotKey(taken) {
   for (let i = 0; i < 26; i += 1) {
     const key = String.fromCharCode(97 + i);
@@ -865,8 +826,8 @@ function nextSlotKey(taken) {
 }
 
 /**
- * 把 WorkBuddy 桌面端的登录文件转成反代能用的 session。
- * 服务端/桌面端的 auth 对象只有相对的 expiresIn，而反代依赖绝对的 expiresAt
+ * 浏览器登录 / 续期拿回来的 auth 对象补齐补算字段。
+ * 服务端返回的 auth 只有相对的 expiresIn，而反代依赖绝对的 expiresAt
  * 判断是否需要刷新；这里统一补算，避免踩到“expiresAt 缺失后再不刷新”的坑。
  */
 /**
@@ -874,7 +835,7 @@ function nextSlotKey(taken) {
  *
  * 服务端只给相对的 expiresIn，而反代只按绝对的 expiresAt 判断是否需要刷新；
  * 缺了它的 session 会被当成「永不过期」，此后再不刷新，access_token 一过期就全量 401。
- * 所以不管是导入桌面端文件还是浏览器登录，写盘前都要补上。
+ * 所以建档写盘前都要补上。
  */
 function withAbsoluteExpiry(auth) {
   const nowMs = Date.now();
@@ -891,48 +852,6 @@ function withAbsoluteExpiry(auth) {
   return next;
 }
 
-function importSession(file) {
-  const src = file || findDesktopInfo();
-  if (!src) {
-    fail(`未找到 ${REGION.title}的桌面端登录文件。请在 WorkBuddy 里登录一次，或改用浏览器登录：${binName()} login`);
-  }
-  if (!fs.existsSync(src)) fail(`文件不存在：${src}`);
-  const source = readJson(src);
-  if (!source) fail(`无法解析为 JSON：${src}`);
-  const auth = source.auth || {};
-  if (!auth.accessToken || !auth.refreshToken) {
-    fail(`${src} 里没有 accessToken/refreshToken，请先在 WorkBuddy 桌面端登录`);
-  }
-  // 国际版把 token 落盘成 {$wbEncrypted:1, envelope:…} 加密对象，而反代会把它
-  // 当成字符串直接拼进 Authorization 头，用这种文件建的 slot 每个请求都 401。
-  // 与其建一个看似成功的坏 slot，不如在这里拦下来。
-  if (typeof auth.accessToken !== 'string' || typeof auth.refreshToken !== 'string') {
-    fail(
-      `${src} 里的 token 是加密对象，不能直接给反代使用。\n` +
-        `      请改用浏览器登录建档：${binName()} login`
-    );
-  }
-  const account = source.account || {};
-  const nextAuth = withAbsoluteExpiry(auth);
-
-  const slots = listSlots();
-  const existing = slots.find((s) => (s.account || {}).uid === account.uid);
-  const key = existing ? existing.key : nextSlotKey(new Set(slots.map((s) => s.key)));
-  const session = { auth: nextAuth, account, machineId: currentMachineId() };
-  writeSlot(key, session);
-  ok(`已写入 slot ${key}：${displayName(account)}（来源 ${src}）`);
-
-  const live = readJson(LIVE);
-  const liveValid = !!(live && live.auth && live.auth.accessToken &&
-    Number(live.auth.expiresAt || 0) > Date.now());
-  if (!liveValid) {
-    writeFileTight(LIVE, JSON.stringify(session, null, 2) + '\n');
-    ok(`已设为当前生效账号（${LIVE}）`);
-  } else {
-    info(`生效文件已有效，未改动；需要切换请执行 ${binName()} account ${key}`);
-  }
-}
-
 function dateStamp() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
@@ -941,8 +860,7 @@ function dateStamp() {
 
 /** 添加账号。两个 region 的建档方式不同，由 region 决定走哪条路。 */
 async function cmdAccountAdd() {
-  if (REGION.key === 'global') return cmdLogin();
-  return importSession();
+  return cmdLogin();
 }
 
 /**
@@ -978,8 +896,9 @@ function cmdAccountRemove(key) {
  * 走反代自带的登录流程：POST /v2/plugin/auth/state 拿 authUrl → 用户在浏览器
  * 完成登录 → 轮询 /v2/plugin/auth/token 取回凭证。
  *
- * 拿回来的是服务端签发的明文凭证，与桌面端落盘的那份加密对象无关。国际版只
- * 有这一条可行的建档路径（国内版仍可优先用 import-session 导入桌面端文件）。
+ * 拿回来的是服务端签发的明文凭证。两个区域共用这一条建档路径：桌面端落盘的
+ * 凭证不通用（国际版是加密对象，反代会把密文当明文塞进 Authorization 头，
+ * 每个请求都 401），所以不提供「从桌面端文件导入」。
  */
 async function cmdLogin() {
   const uv = findUv();
@@ -1128,6 +1047,46 @@ function cmdLogs(lines) {
   process.stdout.write(all.slice(-(lines + 1)).join('\n'));
 }
 
+/**
+ * 查看模型：两件事分开列——pi 里这个 provider 实际可见的模型，以及本机反代
+ * 正在服务的模型。两者不一致就是问题所在（扩展没加载、模型目录读不到、
+ * 或者反代上游没起来），所以并排看比只看一个数字有用。
+ */
+async function cmdModels() {
+  const provider = tuiProviderId();
+  const out = [];
+
+  out.push(`pi 可见（provider ${provider}）`);
+  if (findCmd('pi') || !IS_WIN) {
+    const listed = run('pi', ['--list-models'], { timeout: 180000 });
+    if (listed.status !== 0) {
+      out.push('  读取失败：pi --list-models 没有正常退出');
+    } else {
+      const mine = listed.stdout.split('\n').filter((l) => l.startsWith(`${provider} `));
+      if (!mine.length) {
+        out.push('  0 个。确认扩展已加载（重开 pi），或先登录一个账号');
+      } else {
+        out.push(`  共 ${mine.length} 个`);
+        for (const line of mine) out.push(`    ${line.trim()}`);
+      }
+    }
+  } else {
+    out.push('  未找到 pi');
+  }
+
+  out.push('');
+  out.push(`反代在服务（${BASE}/v1/models）`);
+  const h = await health();
+  if (!h.ok) {
+    out.push(`  不可用：${h.note}`);
+  } else {
+    out.push(`  共 ${h.models} 个`);
+    for (const id of h.ids || []) out.push(`    ${id}`);
+  }
+
+  return out.join('\n');
+}
+
 async function cmdDoctor() {
   let bad = 0;
   const mark = (good, text, hint) => {
@@ -1180,20 +1139,11 @@ async function cmdDoctor() {
 
 // ---------------------------------------------------------------- 交互式控制台
 
-/**
- * 界面本体在 ./tui.js（与 qoder2pi、安装向导共用同一套），这里只做接线：
- * 把 WorkBuddy 的状态与操作映射成 tui.js 要的数据结构。
- */
-const { createTui, C, G, findCmd } = require('./tui');
+// ---------------------------------------------------------------- 交互式控制台
 
 /** pi 里对应的 provider 名，用于给用户交代「这个界面管的是什么」。 */
 function tuiProviderId() {
   return REGION.key === 'global' ? 'workbuddy-global' : 'workbuddy';
-}
-
-/** 另一个区域，用来在两个界面之间互跳。 */
-function otherRegion() {
-  return REGION.key === 'global' ? REGIONS.domestic : REGIONS.global;
 }
 
 /** 把子命令回包给自己当子进程跑，避免直接调内部函数时 process.exit 打乱界面。 */
@@ -1210,14 +1160,11 @@ function runSelf(args, { inherit = false } = {}) {
 }
 
 /**
- * 一个区域的界面定义。抽成工厂是为了让总控 qodbuddy2pi 把两个区域
- * 分别当成一页嵌进去：每个页在 refresh 开头 selectRegion 切到自己的区域，
- * 因为 refresh 是同步取数、一次只跑一页，不会串。
- *
- * 嵌进总控时用页签切换，所以菜单里的「切换到另一个区域界面」要去掉；
- * 独立运行时它仍然是原样（inTabs 为 false）。
+ * 一个区域的页定义。抽成工厂是为了让总控把两个区域分别当成一页嵌进去：
+ * 每个页在 refresh 开头 selectRegion 切到自己的区域，因为 refresh 是同步
+ * 取数、一次只跑一页，不会串。
  */
-function workbuddyPage(regionKey, { inTabs = false } = {}) {
+function workbuddyPage(regionKey) {
   selectRegion(regionKey);
   return {
     label: `WorkBuddy ${REGION.title}`,
@@ -1247,21 +1194,19 @@ function workbuddyPage(regionKey, { inTabs = false } = {}) {
         { id: 'switch', group: '账号', label: '切换账号', note: '换一个账号生效（会重启服务）',
           pick: 'accounts', pickTitle: '切换到哪个账号', emptyHint: '还没有账号，先「添加账号」' },
         { id: 'add', group: '账号', label: '添加账号',
-          note: REGION.key === 'global' ? '浏览器登录，存为一个新账号' : '从桌面端登录文件导入' },
+          note: '浏览器登录，存为一个新账号' },
         { id: 'remove', group: '账号', label: '删除账号', note: '移除账号，凭证留档可恢复',
           pick: 'accounts', pickTitle: '删除哪个账号', emptyHint: '还没有账号' },
         { id: 'renew', group: '账号', label: '续期凭证', note: '用 refresh_token 换取新凭证',
           pick: 'accounts', pickTitle: '续期哪个账号', emptyHint: '还没有账号' },
-        { id: 'restart', group: '服务', label: '重启服务', note: '重启本机反代进程' },
-        { id: 'install', group: '服务', label: '安装服务', note: '注册开机自启的常驻服务' },
-        { id: 'doctor', group: '服务', label: '自检', note: '检查依赖、凭证、服务与 pi 接入' },
-        { id: 'logs', group: '服务', label: '查看日志', note: '看反代日志尾部' },
+        { id: 'models', group: '维护', label: '查看模型', note: 'pi 可见的模型与反代在服务的模型' },
+        { id: 'restart', group: '维护', label: '重启服务', note: '重启本机反代进程' },
+        { id: 'install', group: '维护', label: '安装服务', note: '注册开机自启的常驻服务' },
+        { id: 'doctor', group: '维护', label: '自检', note: '检查依赖、凭证、服务与 pi 接入' },
+        { id: 'logs', group: '维护', label: '查看日志', note: '看反代日志尾部' },
       ];
-      // 独立运行时提供跳到另一区域界面的入口；已经在页签里就没必要了
-      if (!inTabs) {
-        menu.push({ id: 'jump', group: '界面', label: `切换到${otherRegion().title}界面`,
-          note: `管理另一区域（端口 ${otherRegion().port}）` });
-      }
+      // 不再提供「跳到另一区域界面」：总控把它当一页，用页签切就行。
+      // （以前只有独立运行才给这个入口，现在不带子命令总是开总控。）
       menu.push({ id: 'quit', group: '界面', label: '退出', note: '' });
 
       return {
@@ -1290,22 +1235,6 @@ function workbuddyPage(regionKey, { inTabs = false } = {}) {
       selectRegion(regionKey);
       if (id === 'quit') return { quit: true };
 
-      // 跳到另一个区域的界面：把终端交给它的 TUI，等它退出再回到这里，可以来回跳
-      if (id === 'jump') {
-        const target = otherRegion().key;
-        return {
-          suspend: async () => {
-            const args = target === 'global' ? ['global', 'tui'] : ['tui'];
-            // region 是从环境变量 WORKBUDDY_REGION 或首参数读的，而子进程会继承环境。
-            // 不把变量清干净的话，从国际版界面跳国内版会又开回国际版。
-            const env = { ...process.env };
-            if (target === 'global') env.WORKBUDDY_REGION = 'global';
-            else delete env.WORKBUDDY_REGION;
-            spawnSync(process.execPath, [__filename, ...args], { stdio: 'inherit', env });
-          },
-        };
-      }
-
       // 添加账号会开浏览器并等上几分钟，必须把终端交出去，不然看不到登录提示
       if (id === 'add') {
         return {
@@ -1328,9 +1257,11 @@ function workbuddyPage(regionKey, { inTabs = false } = {}) {
       else if (id === 'install') r = runSelf(['install-service']);
       else if (id === 'doctor') r = runSelf(['doctor']);
       else if (id === 'logs') r = runSelf(['logs', '300']);
+      else if (id === 'models') r = { ok: true, out: await cmdModels() };
       else return { flash: `未知操作：${id}`, error: true };
 
       if (id === 'logs') return { title: `日志 · ${REGION.title}`, body: r.out, error: !r.ok };
+      if (id === 'models') return { title: `模型 · ${REGION.title}`, body: r.out, error: !r.ok };
       if (id === 'doctor' || !r.ok) {
         return { title: `${id === 'doctor' ? '自检' : '输出'} · ${REGION.title}`, body: r.out, error: !r.ok };
       }
@@ -1339,9 +1270,30 @@ function workbuddyPage(regionKey, { inTabs = false } = {}) {
   };
 }
 
+/**
+ * 不带子命令且是终端时，打开共享的总控界面并把焦点落在本区域的页。
+ * 子命令（status / account / doctor 等）保持原样。
+ */
 async function tuiMain() {
-  const page = workbuddyPage(REGION.key);
-  await createTui({ ...page, title: page.title, subtitle: page.subtitle });
+  return openConsole(REGION.key === 'global' ? 3 : 2);
+}
+
+/**
+ * 打开总控并落在指定页。
+ *
+ * 用 spawn 而不是 require：总控自己 require 了本文件，直接 require 回去会成环。
+ * spawn 时把 stdio 交出去，让总控拥有真终端。
+ */
+function openConsole(pageNo) {
+  const console_ = require('path').join(__dirname, 'qodbuddy2pi');
+  if (!fs.existsSync(console_)) {
+    fail('找不到总控界面 qodbuddy2pi（与 workbuddy2pi 应在同一目录）。请在仓库里运行 ./install.sh 重新部署。');
+  }
+  const r = spawnSync(process.execPath, [console_, 'tui'], {
+    stdio: 'inherit',
+    env: { ...process.env, QODBUDDY_PAGE: String(pageNo) },
+  });
+  process.exit(r.status === null ? 1 : r.status);
 }
 
 function usage() {
@@ -1362,13 +1314,13 @@ function usage() {
   logs [行数]            查看反代日志尾部（默认 40 行）
   account                列出账号 slot
   account <key>          切换到指定账号
-  account add            添加账号（国际版走浏览器登录，国内版导入桌面端文件）
+  account add            添加账号（浏览器登录建档）
   account remove <key>   删除账号（凭证留档为 <key>-removed-<日期>.json）
   account renew [key]    续期凭证（默认当前账号）
-  login                  浏览器登录建档（与 account add 的国际版路径相同）
+  login                  浏览器登录建档（与 account add 同一条路径）
   install-service        注册并启动常驻服务
   uninstall-service      移除常驻服务
-  import-session [文件]  从桌面端登录文件建档（仅国内版可用）
+  models                 查看模型（pi 可见的与本机反代在服务的）
   doctor                 依赖与接入自检（失败时退出码非零）
 
 例：
@@ -1422,10 +1374,10 @@ async function main() {
       return uninstallService();
     case 'doctor':
       return cmdDoctor();
+    case 'models':
+      return cmdModels().then((body) => { console.log(body); });
     case 'login':
       return cmdLogin();
-    case 'import-session':
-      return importSession(argv[1]);
     case 'check-session':
       return checkSession();
     case 'ensure-auth-key':

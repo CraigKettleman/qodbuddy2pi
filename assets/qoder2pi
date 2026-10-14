@@ -17,11 +17,9 @@ const os = require('os');
 const path = require('path');
 const readline = require('readline');
 const { spawnSync, execFile } = require('child_process');
-const { createTui, C, G, findCmd } = require('./tui');
+const { C, G, findCmd, resolveSpawn, readJson, AUTH_JSON } = require('./tui');
 
 const HOME = os.homedir();
-const PI_DIR = path.join(HOME, '.pi', 'agent');
-const AUTH_JSON = path.join(PI_DIR, 'auth.json');
 const CONFIG = path.join(HOME, '.qoder2pi', 'config.json');
 
 /**
@@ -64,21 +62,15 @@ const fail = (m) => {
 // ---------------------------------------------------------------- 基础工具
 
 function run(cmd, args, opts = {}) {
-  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: opts.timeout || 60000, ...opts });
+  // Windows 上 pi 是 pi.cmd，spawn 不能直接跑，resolveSpawn 会包一层 cmd.exe
+  const sp = resolveSpawn(cmd, args);
+  const r = spawnSync(sp.cmd, sp.args, { encoding: 'utf8', timeout: opts.timeout || 60000, ...opts });
   return {
     status: r.status === null ? -1 : r.status,
     stdout: (r.stdout || '').trim(),
     stderr: (r.stderr || '').trim(),
     error: r.error,
   };
-}
-
-function readJson(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
 }
 
 function fmtTime(ms) {
@@ -124,7 +116,8 @@ function loginState(region) {
 /** 异步版子进程：界面刷新用。同步版会阻塞事件循环，把界面冻住。 */
 function runAsync(cmd, args, opts = {}) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { encoding: 'utf8', timeout: opts.timeout || 60000, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
+    const sp = resolveSpawn(cmd, args);
+    execFile(sp.cmd, sp.args, { encoding: 'utf8', timeout: opts.timeout || 60000, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
       resolve({
         status: error ? -1 : 0,
         stdout: (stdout || '').trim(),
@@ -228,7 +221,8 @@ function cmdLogin(regionKey, patArg) {
   // 扩展在启动时读到该环境变量就会兑换 token 并写入 auth.json，所以这里跑一次
   // --list-models 即可，不需要进入交互界面。
   const env = { ...process.env, [region.patEnv]: pat };
-  const r = spawnSync('pi', ['--provider', region.provider, '--list-models'], { env, encoding: 'utf8', timeout: 180000 });
+  const sp = resolveSpawn('pi', ['--provider', region.provider, '--list-models']);
+  const r = spawnSync(sp.cmd, sp.args, { env, encoding: 'utf8', timeout: 180000 });
   if (authEntry(region)) {
     ok(`已登录：${loginState(region).note}`);
     return 0;
@@ -432,8 +426,34 @@ const qoderPage = {
   },
 };
 
+/**
+ * 不带子命令且是终端时，打开共享的总控界面并把焦点落在 Qoder 页。
+ *
+ * 为什么不在本地 createTui：总控把三个 provider 拼在一起，单独打开自己的
+ * 那一页就等于保留了两套界面形态（页签在此，无页签在彼），和「TUI 集一体」
+ * 相背。子命令（status / login / doctor 等）保持原样，不受影响。
+ */
 async function tuiMain() {
-  await createTui({ ...qoderPage, title: qoderPage.title, subtitle: qoderPage.subtitle });
+  return openConsole(1);
+}
+
+/**
+ * 打开总控并落在指定页。
+ *
+ * 用 spawn 而不是 require：总控自己 require 了本文件，直接 require 回去会成环。
+ * spawn 时把 stdio 交出去，让总控拥有真终端。
+ */
+function openConsole(pageNo) {
+  const { spawnSync } = require('child_process');
+  const console_ = require('path').join(__dirname, 'qodbuddy2pi');
+  if (!fs.existsSync(console_)) {
+    fail('找不到总控界面 qodbuddy2pi（与 qoder2pi 应在同一目录）。请在仓库里运行 ./install.sh 重新部署。');
+  }
+  const r = spawnSync(process.execPath, [console_, 'tui'], {
+    stdio: 'inherit',
+    env: { ...process.env, QODBUDDY_PAGE: String(pageNo) },
+  });
+  process.exit(r.status === null ? 1 : r.status);
 }
 
 // ---------------------------------------------------------------- 入口

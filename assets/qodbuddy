@@ -1,0 +1,16 @@
+#!/usr/bin/env node
+/**
+ * qodbuddy — qodbuddy2pi 的别名。
+ *
+ * 不带参数时打开总控并落在第一页；带参数时把参数原样转给 qodbuddy2pi
+ * （所以 `qodbuddy --check`、`qodbuddy probe` 也能用）。
+ *
+ * 用独立入口文件而不是软链：Windows 上建软链要开发者模式或管理员权限，
+ * 而且 .cmd 转发层会把程序名吃掉，靠 argv[0] 判断用了哪个名字不可靠。
+ */
+
+'use strict';
+
+process.env.QODBUDDY_PAGE = '1';
+
+require(require('node:path').join(__dirname, 'qodbuddy2pi'));

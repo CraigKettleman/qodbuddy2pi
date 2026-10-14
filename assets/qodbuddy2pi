@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * qodbuddy2pi — 三个 provider 的总控界面。
+ * qodbuddy2pi — 总控界面，也是整套工具的正式入口。
  *
  * 一页装一个 provider，用数字键或 Tab 切换：
  *   1 Qoder                 qoder-cn（国内版）与 qoder（国际版）
@@ -8,21 +8,24 @@
  *   3 WorkBuddy 国际版      本机 8788 的反代
  *
  * 三页的界面定义直接来自各自的运维命令（qoderPage / workbuddyPage），
- * 业务逻辑一行没有复制：这里只负责把它们拼起来，并处理首次运行的配置引导。
- * 因此单个命令（workbuddy2pi / workbuddy2pi-global / qoder2pi）照旧可用，
- * 功能只会在这里多出来的那部分之外保持一致。
+ * 业务逻辑一行没有复制：这里只负责把它们拼起来。
+ *
+ * 别名 qodbuddy / workbuddy2pi / qoder2pi 打开的是同一个总控，只是焦点
+ * 预落在对应页（靠 QODBUDDY_PAGE 环境变量指定，见 assets/qodbuddy）。
  *
  * 三个 provider 的形态并不对称：WorkBuddy 是「本机反代服务 + 多账号」，
  * Qoder 没有服务、凭证直接落在 pi 的 auth.json，所以它的页管的是两个区域的
  * 登录状态，而不是账号切换。
+ *
+ * 接入（安装）不在这里：它是一条一次性流水线，走纯文本引导，由 install.sh
+ * 或 install.ps1 负责。这里只做日常运维。
  */
 
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
-const readline = require('readline');
-const { createTui, C, G, findCmd } = require('./tui');
+const { createTui, C, G, findCmd, readJson, AUTH_JSON, DATA_DIR, log } = require('./tui');
 const { qoderPage } = require('./qoder2pi');
 const wb = require('./workbuddy2pi');
 
@@ -30,68 +33,47 @@ const HOME = require('os').homedir();
 
 /**
  * 单独装过 WorkBuddy 或 Qoder、但对方是旧版本时，两者的导出可能对不上。
- * 与其抛一堆栈，不如直接说清楚去重跑哪个安装脚本。
+ * 与其抛一堆栈，不如直接说清楚该重跑什么。
  */
-function pageFactory(value, script) {
+function pageFactory(value) {
   if (typeof value !== 'function') {
-    console.error('\x1b[1;31m错误:\x1b[0m 同目录的 workbuddy2pi 版本过旧，没有导出总控需要的接口。');
-    console.error(`      请重跑仓库里的 ${script}，或在仓库根目录跑 ./qodbuddy`);
-    process.exit(1);
+    log.fail('同目录的 workbuddy2pi 版本过旧，没有导出总控需要的接口。\n'
+      + '      请在仓库里运行 ./install.sh 重新部署运维命令。');
   }
   return value;
 }
 
-const workbuddyPage = pageFactory(wb.workbuddyPage, 'workbuddy2pi/install-workbuddy2pi.sh');
-// Qoder 的页是对象而不是工厂（它没有区域副本，两个区域并存）
+const workbuddyPage = pageFactory(wb.workbuddyPage);
 if (!qoderPage || typeof qoderPage.refresh !== 'function') {
-  console.error('\x1b[1;31m错误:\x1b[0m 同目录的 qoder2pi 版本过旧，没有导出总控需要的接口。');
-  console.error('      请重跑仓库里的 qoder2pi/install-pi-qoder.sh，或在仓库根目录跑 ./qodbuddy');
-  process.exit(1);
+  log.fail('同目录的 qoder2pi 版本过旧，没有导出总控需要的接口。\n'
+    + '      请在仓库里运行 ./install.sh 重新部署运维命令。');
 }
 
 /** 三个页；顺序就是页签上的 1/2/3。 */
 const PAGES = [
   qoderPage,
-  workbuddyPage('domestic', { inTabs: true }),
-  workbuddyPage('global', { inTabs: true }),
+  workbuddyPage('domestic'),
+  workbuddyPage('global'),
 ];
 
-const ok = (m) => console.log(`\x1b[1;32m✓\x1b[0m ${m}`);
-const info = (m) => console.log(`\x1b[1;36m==>\x1b[0m ${m}`);
-const warn = (m) => console.log(`\x1b[1;33m!\x1b[0m ${m}`);
-const fail = (m) => {
-  console.error(`\x1b[1;31m错误:\x1b[0m ${m}`);
-  process.exit(1);
-};
-
-function readJson(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
+/**
+ * 别名指定初始页：环境变量里放页号（1 起）或页签名。
+ * 认不出来就回第一页，不报错——别名只是快捷方式，不该因为名字没对上就拒绝启动。
+ */
+function initialPageFromEnv() {
+  const want = (process.env.QODBUDDY_PAGE || '').trim();
+  if (!want) return 0;
+  const n = Number(want);
+  if (Number.isInteger(n) && n >= 1 && n <= PAGES.length) return n - 1;
+  const byLabel = PAGES.findIndex((p) => p.label && p.label.toLowerCase() === want.toLowerCase());
+  return byLabel >= 0 ? byLabel : 0;
 }
 
-/** 命令是否存在；用 findCmd 直接查 PATH，不依赖 shell（Windows 上没有 sh）。 */
-function has(cmd) {
-  return !!findCmd(cmd);
-}
+// ---------------------------------------------------------------- 环境检查
 
-function promptLine(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.trim());
-    });
-  });
-}
-
-// ---------------------------------------------------------------- 首次配置引导
-
-/** 判断某个 provider 是不是还没配过。 */
+/** 某个 provider 是不是已经接入。 */
 function configured() {
-  const auth = readJson(path.join(HOME, '.pi', 'agent', 'auth.json')) || {};
+  const auth = readJson(AUTH_JSON) || {};
   return {
     qoderCn: !!auth['qoder-cn'],
     qoderGlobal: !!auth.qoder,
@@ -101,63 +83,83 @@ function configured() {
 }
 
 /**
- * 首次运行时的逐项询问：只在从没配过任何 provider 时触发一次。
- * 之后都靠用户在总控里主动操作，不反复打扰。
+ * 环境检查：四个 provider 各自依赖什么，缺什么就说清楚。
+ * 用于 --check（纯文本，适合脚本）与 install.sh 的收尾自检。
  */
-async function firstRunWizard() {
-  const c = configured();
-  if (c.qoderCn || c.qoderGlobal || c.wbDomestic || c.wbGlobal) return;
-
-  console.log('');
-  console.log('检测到还没有任何 provider 接入 pi。');
-  console.log('下面逐项询问，现在不想配的直接回车跳过，之后可以在总控界面里随时补。');
-  console.log('');
-
-  const items = [
-    ['WorkBuddy 国内版', '从桌面端登录文件导入，端口 8787', ['account', 'add']],
-    ['WorkBuddy 国际版', '浏览器登录，端口 8788', ['global', 'account', 'add']],
-    ['Qoder 国内版', '需要 PAT（qoder.com.cn）', ['qoder-pat', 'cn']],
-    ['Qoder 国际版', '需要 PAT（qoder.com）', ['qoder-pat', 'global']],
-  ];
-
-  const { spawnSync } = require('child_process');
-  const workbuddy = path.join(__dirname, 'workbuddy2pi');
-  const qoder = path.join(__dirname, 'qoder2pi');
-
-  for (const [title, note, argv] of items) {
-    const answer = await promptLine(`接入 ${title}？（${note}）[y/N] `);
-    if (!/^y(es)?$/i.test(answer)) continue;
-
-    if (argv[0] === 'qoder-pat') {
-      const region = argv[1];
-      const page = argv[1] === 'cn' ? 'qoder.com.cn' : 'qoder.com';
-      const pat = await promptLine(`  粘贴 ${page} 的 PAT：`);
-      if (!pat) {
-        warn('  跳过');
-        continue;
-      }
-      const r = spawnSync(process.execPath, [qoder, 'login', region], {
-        stdio: 'inherit',
-        env: { ...process.env, QODER_PAT: pat },
-      });
-      r.status === 0 ? ok(`  ${title} 已接入`) : warn(`  ${title} 未完成`);
-    } else {
-      const r = spawnSync(process.execPath, [workbuddy, ...argv], { stdio: 'inherit' });
-      r.status === 0 ? ok(`  ${title} 已接入`) : warn(`  ${title} 未完成`);
+function check() {
+  let bad = 0;
+  const mark = (good, text, hint) => {
+    if (good) log.ok(text);
+    else {
+      bad += 1;
+      log.warn(`${text}${hint ? `　→ ${hint}` : ''}`);
     }
-    console.log('');
-  }
+  };
 
-  info('引导结束，进入总控界面（随时可以 r 刷新、q 退出）');
+  mark(true, `Node.js ${process.version}`);
+  mark(!!findCmd('pi'), 'pi 已安装', '运行 install.sh');
+  // WorkBuddy 的反代是 Python 写的，由 uv 按需拉起，所以只需要 uv。
+  // Qoder 不需要它，因此这不算硬前提，只在这里提示
+  mark(!!findCmd('uv'), 'uv 已安装（仅 WorkBuddy 反代需要）', '运行 install.sh');
+  mark(fs.existsSync(AUTH_JSON), 'pi 的 auth.json 存在', '先运行一次 pi 登录');
+
+  const c = configured();
+  mark(c.wbDomestic, 'WorkBuddy 国内版已接入', 'workbuddy2pi account add');
+  mark(c.wbGlobal, 'WorkBuddy 国际版已接入', 'workbuddy2pi 里切到国际版页后添加账号');
+  mark(c.qoderCn, 'Qoder 国内版已登录', 'qoder2pi login cn pt-xxxxxx');
+  mark(c.qoderGlobal, 'Qoder 国际版已登录', 'qoder2pi login global pt-xxxxxx');
+
+  console.log('');
+  if (bad === 0) log.ok('环境检查全部通过');
+  else log.warn(`有 ${bad} 项未就绪（未接入的 provider 不影响其它 provider 使用）`);
+  return bad;
+}
+
+/**
+ * 探测：把「本机现在接入了什么」报给调用方，供安装器决定装什么。
+ *
+ * 输出 JSON 到 stdout，供 install.sh 消费。探测逻辑只此一份：总控自己
+ * 也用它渲染状态，安装器调同一个子命令，不会两处漂移。
+ */
+function probe() {
+  const c = configured();
+  const out = {
+    pi: !!findCmd('pi'),
+    uv: !!findCmd('uv'),
+    providers: {
+      'qoder-cn': c.qoderCn,
+      qoder: c.qoderGlobal,
+      workbuddy: c.wbDomestic,
+      'workbuddy-global': c.wbGlobal,
+    },
+  };
+  process.stdout.write(`${JSON.stringify(out)}\n`);
+}
+
+/**
+ * 硬门槛：不满足就没法往下走，直接说清楚并退出。
+ * 只检查真正硬的前提，可选依赖（uv、各个 provider 的登录）留给界面提示。
+ */
+function preflight() {
+  if (!findCmd('pi')) {
+    log.warn('未找到 pi。');
+    console.error('      Qoder 与 WorkBuddy 都是接到 pi 上的 provider：');
+    console.error('        macOS / Linux   ./install.sh');
+    console.error('        Windows         install.ps1');
+    console.error('      它会用 pi 的官方安装方式装好 pi 与依赖，然后引导你接入。');
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------- 入口
 
 async function tuiMain() {
+  const page = initialPageFromEnv();
   await createTui({
-    title: 'qodbuddy2pi · 总控',
+    title: '总控',
     subtitle: `Qoder 与 WorkBuddy（国内版 / 国际版）　·　${PAGES.length} 个 provider`,
     pages: PAGES,
+    initialPage: page,
   });
 }
 
@@ -167,6 +169,7 @@ function usage() {
 用法：
   qodbuddy2pi            进入总控界面（不带参数且是终端时默认如此）
   qodbuddy2pi --check    只做环境检查（纯文本，适合脚本）
+  qodbuddy2pi probe      以 JSON 报出本机已接入哪些 provider（供安装器调用）
   qodbuddy2pi --help     显示本帮助
 
 界面里用 1/2/3 或 Tab 切换三个 provider：
@@ -174,53 +177,12 @@ function usage() {
   2  WorkBuddy 国内版     本机 8787 的反代
   3  WorkBuddy 国际版     本机 8788 的反代
 
-各 provider 单独使用时仍是原来的命令，功能一致：
-  qoder2pi                Qoder 的登录状态与扩展
-  workbuddy2pi            WorkBuddy 国内版的服务与账号
-  workbuddy2pi-global     WorkBuddy 国际版的服务与账号`);
-}
+别名打开的是同一个总控，只是焦点预落在对应页：
+  qodbuddy                总控（第一页）
+  qoder2pi                Qoder 页
+  workbuddy2pi            WorkBuddy 国内版页
 
-/** 环境检查：三个 provider 各自依赖什么，缺什么就说清楚。 */
-function check() {
-  let bad = 0;
-  const mark = (good, text, hint) => {
-    if (good) ok(text);
-    else {
-      bad += 1;
-      warn(`${text}${hint ? `　→ ${hint}` : ''}`);
-    }
-  };
-
-  mark(true, `Node.js ${process.version}`);
-  mark(has('pi'), 'pi 已安装', '运行仓库里的安装脚本');
-  // WorkBuddy 的反代是 Python 写的，由 uv 按需拉起，所以只需要 uv。
-  // Qoder 不需要它，因此这不算硬前提，只在这里提示
-  mark(has('uv'), 'uv 已安装（仅 WorkBuddy 反代需要）', '见 workbuddy2pi/README.md');
-  mark(fs.existsSync(path.join(HOME, '.pi', 'agent', 'auth.json')), 'pi 的 auth.json 存在', '先运行一次 pi 登录');
-
-  const c = configured();
-  mark(c.wbDomestic, 'WorkBuddy 国内版已接入', 'workbuddy2pi account add');
-  mark(c.wbGlobal, 'WorkBuddy 国际版已接入', 'workbuddy2pi-global account add');
-  mark(c.qoderCn, 'Qoder 国内版已登录', 'qoder2pi login cn pt-xxxxxx');
-  mark(c.qoderGlobal, 'Qoder 国际版已登录', 'qoder2pi login global pt-xxxxxx');
-
-  console.log('');
-  if (bad === 0) ok('环境检查全部通过');
-  else warn(`有 ${bad} 项未就绪（未接入的 provider 不影响其它 provider 使用）`);
-  return bad;
-}
-
-/**
- * 硬门槛：不满足就没法往下走，直接说清楚并退出。
- * 只检查真正硬的前提，可选依赖（uv、各个 provider 的登录）留给引导与界面提示。
- */
-function preflight() {
-  if (!has('pi')) {
-    console.error('\x1b[1;31m错误:\x1b[0m 未找到 pi。');
-    console.error('      Qoder 与 WorkBuddy 都是接到 pi 上的 provider，请先安装 pi coding agent，');
-    console.error('      或直接跑仓库里的安装脚本（会自动处理）。');
-    process.exit(1);
-  }
+要接入（安装）provider，跑仓库里的 ./install.sh（Windows 为 install.ps1）。`);
 }
 
 async function main() {
@@ -229,21 +191,21 @@ async function main() {
 
   if (cmd === '-h' || cmd === '--help' || cmd === 'help') return usage();
   if (cmd === '--check' || cmd === 'check') return process.exit(check() ? 1 : 0);
+  if (cmd === 'probe') return probe();
 
-  // 无参数时：先过硬门槛，再进首次引导（只在从没配过时问）与总控界面
+  // 无参数且是终端：过硬门槛后进总控
   if (!argv.length && process.stdout.isTTY && process.stdin.isTTY) {
     preflight();
-    await firstRunWizard();
     return tuiMain();
   }
   if (cmd === 'tui') {
     preflight();
     return tuiMain();
   }
-  if (!argv.length) fail('需要在终端里运行；用法见 qodbuddy2pi --help');
+  if (!argv.length) log.fail('需要在终端里运行；用法见 qodbuddy2pi --help');
 
   usage();
-  fail(`未知子命令：${cmd}`);
+  log.fail(`未知子命令：${cmd}`);
 }
 
-main().catch((e) => fail(e && e.stack ? e.stack : String(e)));
+main().catch((e) => log.fail(e && e.stack ? e.stack : String(e)));

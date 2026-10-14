@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-# qodbuddy — 仓库根目录的统一接入向导入口。
-#
-# 向导要调用本仓库里的四份安装脚本，所以必须从仓库里运行，不装到 ~/.local/bin。
-set -euo pipefail
-exec node "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/assets/wizard.js" "$@"

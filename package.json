@@ -1,6 +1,6 @@
 {
   "name": "qodbuddy2pi",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "把 Qoder 与 WorkBuddy（国内版 / 国际版）的订阅接入 pi coding agent，并提供一个总控 TUI",
   "keywords": [
     "pi",
@@ -15,26 +15,32 @@
   "type": "commonjs",
   "bin": {
     "qodbuddy2pi": "assets/qodbuddy2pi",
+    "qodbuddy": "assets/qodbuddy",
     "qoder2pi": "assets/qoder2pi",
-    "workbuddy2pi": "assets/workbuddy2pi",
-    "workbuddy2pi-global": "assets/workbuddy2pi-global"
+    "workbuddy2pi": "assets/workbuddy2pi"
   },
   "files": [
-    "assets/",
-    "qoder2pi/install-pi-qoder.sh",
-    "qoder2pi/install-pi-qoder.ps1",
-    "qoder2pi/README.md",
-    "workbuddy2pi/install-workbuddy2pi.sh",
-    "workbuddy2pi/install-workbuddy2pi.ps1",
-    "workbuddy2pi/README.md",
-    "qodbuddy",
-    "qodbuddy.cmd",
+    "assets/tui.js",
+    "assets/qodbuddy2pi",
+    "assets/qodbuddy2pi.cmd",
+    "assets/qodbuddy",
+    "assets/qodbuddy.cmd",
+    "assets/qoder2pi",
+    "assets/qoder2pi.cmd",
+    "assets/workbuddy2pi",
+    "assets/workbuddy2pi.cmd",
+    "assets/workbuddy.ts",
+    "assets/vendor/",
+    "install.sh",
+    "install.ps1",
     "README.md",
     "LICENSE"
   ],
-  "scripts": {},
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.19"
   },
   "os": [
     "darwin",

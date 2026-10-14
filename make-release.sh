@@ -43,17 +43,20 @@ for target in "${TARGETS[@]}"; do
   mkdir -p "$stage"
   tar -xzf "$TARBALL" -C "$stage" --strip-components=1
 
-  # 不装 npm 的人拿到压缩包后，直接跑这个
+  # 不装 npm 的人拿到压缩包后，直接跑这个。
+  # 它调真正的安装器（而不是直接开 TUI）——解压后第一次用应该是「装好」，
+  # 而不是进一个什么都还没接入的界面。
   cat > "$stage/start.sh" <<'SH'
 #!/usr/bin/env bash
-# 未通过 npm 安装时用它启动总控界面。
-# 它只做一件事：把总控交给 node 跑（总控自己会检查 pi 等必备环境）。
+# 未通过 npm 安装时的入口：跑安装器。
+# 装好之后日常用 qodbuddy2pi（总控界面）。
 set -euo pipefail
-exec node "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/assets/qodbuddy2pi" "$@"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$HERE/install.sh" "$@"
 SH
   chmod 755 "$stage/start.sh"
 
-  printf '@echo off\r\nrem 未通过 npm 安装时用它启动总控界面。\r\nsetlocal\r\nnode "%%~dp0assets\\qodbuddy2pi" %%*\r\nexit /b %%ERRORLEVEL%%\r\n' \
+  printf '@echo off\r\nrem 未通过 npm 安装时的入口: 跑安装器。\r\nrem 装好之后日常用 qodbuddy2pi (总控界面)。\r\nsetlocal\r\npowershell -ExecutionPolicy Bypass -File "%%~dp0install.ps1" %%*\r\nexit /b %%ERRORLEVEL%%\r\n' \
     > "$stage/start.cmd"
 
   case "$target" in
