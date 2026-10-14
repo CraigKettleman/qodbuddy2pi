@@ -4,14 +4,14 @@
 
 </div>
 
-<p align="center">      
-    <em>把 Qoder 与 WorkBuddy 的订阅额度接进 pi coding agent。</em>      
+<p align="center">
+    <em>把 Qoder 与 WorkBuddy 的订阅额度接进 pi coding agent。</em>
 </p>
 
-<p align="center">      
-    <a href="https://github.com/CraigKettleman/qoder2pi/releases"><img src="https://img.shields.io/github/v/release/CraigKettleman/qoder2pi?style=flat-square\\\\\\\&label=release\\\\\\\&color=22c55e" alt="Latest release" /></a>      
-    <a href="https://www.npmjs.com/package/qodbuddy2pi"><img src="https://img.shields.io/npm/v/qodbuddy2pi?style=flat-square\\\\\\\&label=npm" alt="npm" /></a>      
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License" /></a>      
+<p align="center">
+    <a href="https://github.com/CraigKettleman/qoder2pi/releases"><img src="https://img.shields.io/github/v/release/CraigKettleman/qoder2pi?style=flat-square&label=release&color=22c55e" alt="Latest release" /></a>
+    <a href="https://www.npmjs.com/package/qodbuddy2pi"><img src="https://img.shields.io/npm/v/qodbuddy2pi?style=flat-square&label=npm" alt="npm" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License" /></a>
 </p>
 
 ## 这是什么
@@ -64,8 +64,18 @@ bun add -g --ignore-scripts qodbuddy2pi && qodbuddy2pi install
 
 **下载压缩包**
 
-到 [Releases](https://github.com/CraigKettleman/qoder2pi/releases) 下载对应平台的包
-（`qodbuddy2pi-<平台>.tar.gz` / `.zip`），解开后跑 `./start.sh`（Windows 是 `start.cmd`）。
+到 [Releases](https://github.com/CraigKettleman/qoder2pi/releases) 下载 `qodbuddy2pi.tar.gz`
+（Unix）或 `qodbuddy2pi.zip`（Windows，系统自带解压），解开后跑 `./start.sh`（Windows 是
+`start.cmd`）。
+
+包是**平台无关**的：里面全是 JS / TS / JSON，没有编译出的二进制，所以不用挑平台。
+带版本号的同名文件（`qodbuddy2pi-2.0.0.tar.gz`）是同一份内容，给需要锁定版本的人用。
+想核对下载完整性，同一个 Release 里带 `SHA256SUMS`：
+
+```bash
+shasum -a 256 -c SHA256SUMS        # macOS / Linux
+Get-FileHash qodbuddy2pi.zip       # Windows（与文件里的值对照）
+```
 
 **从源码**
 
@@ -135,7 +145,7 @@ workbuddy2pi doctor             # 自检
 
 <details>
 
-<summary><strong>原理</strong>      
+<summary><strong>原理</strong>
    </summary>
 
 ```
@@ -156,7 +166,7 @@ Qoder 没有这一层：扩展直接跟 Qoder 网关通信。
 
 <details>
 
-<summary><strong>依赖都固定在本仓库</strong>      
+<summary><strong>依赖都固定在本仓库</strong>
    </summary>
 
 两个 provider 的实现本体都在仓库里，安装脚本不会从别的仓库拉取：

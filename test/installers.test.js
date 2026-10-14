@@ -169,7 +169,7 @@ test('发布流程：打 tag 时同时出 npm 包与四个平台的压缩包', (
   assert.match(wf, /tags:/, 'workflow 应监听 tag');
   assert.match(wf, /npm test/, '发布前应跑测试');
   assert.match(wf, /npm publish/, '应发布到 npm');
-  assert.match(wf, /make-release\.sh --all/, '应生成四个平台的压缩包');
+  assert.match(wf, /make-release\.sh/, '应生成压缩包');
   assert.match(wf, /SHA256SUMS/, '应产出校验值文件');
   // 压缩包内容必须来自 npm pack，两条路径才不会漂移
   const rel = read('make-release.sh');
@@ -190,11 +190,14 @@ test('一行流：没有 assets/ 时自己下载 release 再 exec 真正的安�
 
 test('release 同时产出固定文件名，一行流的 URL 才能长期有效', () => {
   const rel = read('make-release.sh');
-  // .../releases/latest/download/qodbuddy2pi-<平台>.tar.gz 这种 URL 要求文件名不带版本号
-  assert.match(rel, /qodbuddy2pi-\$target/, 'make-release.sh 应另存一份不带版本号的副本');
+  // .../releases/latest/download/qodbuddy2pi.tar.gz 这种 URL 要求文件名不带版本号
+  assert.match(rel, /OUT\/qodbuddy2pi\.tar\.gz/, 'make-release.sh 应产出固定名 tar.gz');
+  assert.match(rel, /OUT\/qodbuddy2pi\.zip/, 'make-release.sh 应产出固定名 zip');
+  assert.match(rel, /\$NAME\.tar\.gz/, 'make-release.sh 应另留一份带版本号的');
   // CI 里要确认这些固定名真的在，否则一行流 404
   const wf = read('.github/workflows/release.yml');
-  assert.match(wf, /qodbuddy2pi-darwin-arm64\.tar\.gz|稳定文件名/, 'workflow 应校验固定文件名存在');
+  assert.match(wf, /固定文件名/, 'workflow 应校验固定文件名存在');
+  assert.match(wf, /qodbuddy2pi\.tar\.gz/, 'workflow 校验的应是固定名');
 });
 
 test('README 首页给出一行安装命令（不必先克隆仓库）', () => {
@@ -202,4 +205,24 @@ test('README 首页给出一行安装命令（不必先克隆仓库）', () => {
   assert.match(readme, /curl -fsSL \S+install\.sh \| sh/, 'README 应有 curl|sh 一行安装');
   assert.match(readme, /irm \S+install\.ps1 \| iex/, 'README 应有 irm|iex 一行安装');
   assert.match(readme, /npm i -g/, 'README 应有 npm 安装');
+});
+
+test('release 只出平台无关的包（不做无意义的分平台）', () => {
+  const rel = read('make-release.sh');
+  // 产物全部是文本（JS/TS/JSON）加一个 py3-none-any 的 wheel，没有编译产物，
+  // 所以不该再按 darwin/linux/win32 各打一份——那四份解出来逐字节相同。
+  assert.ok(
+    !/TARGETS=\s*\(\s*darwin/.test(rel),
+    'make-release.sh 不该再按平台分四个包（内容完全相同）',
+  );
+  assert.match(rel, /qodbuddy2pi\.tar\.gz/, '应产出固定名 tar.gz 供一行流下载');
+  assert.match(rel, /qodbuddy2pi\.zip/, '应产出 zip 供 Windows 用');
+
+  // vendored wheel 必须是平台无关的 py3-none-any
+  const wheels = fs.readdirSync(path.join(ROOT, 'assets', 'vendor'))
+    .filter((f) => f.endsWith('.whl'));
+  assert.ok(wheels.length > 0, 'assets/vendor 下应有 wheel');
+  for (const w of wheels) {
+    assert.match(w, /py3-none-any\.whl$/, `${w} 不是平台无关的 wheel，那就真需要分平台了`);
+  }
 });
