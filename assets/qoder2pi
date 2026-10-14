@@ -190,7 +190,7 @@ function cmdStatus() {
   const vendor = extensionPath();
   console.log(
     `  扩展      : ${extensionInstalled() ? 'pi-provider-qoder 已安装' : `\x1b[1;33m未安装\x1b[0m`}` +
-      (vendor ? `（本仓库副本 ${path.relative(HOME, vendor)}）` : `（${CONFIG} 里没有记录仓库路径）`)
+      (vendor ? `（扩展副本 ${path.relative(HOME, vendor)}）` : `（${CONFIG} 里没有记录扩展副本路径）`)
   );
   console.log(`  凭证文件  : ${fs.existsSync(AUTH_JSON) ? AUTH_JSON : `\x1b[1;33m${AUTH_JSON} 不存在\x1b[0m`}`);
   console.log('');
@@ -253,13 +253,13 @@ function cmdLogout(regionKey) {
 function cmdInstallExtension() {
   const vendor = extensionPath();
   if (!vendor) {
-    fail(`找不到扩展副本：${CONFIG} 里没有有效的 vendorQoder 路径。请重新运行 qoder2pi/install-pi-qoder.sh`);
+    fail(`找不到扩展副本：${CONFIG} 里没有有效的 vendorQoder 路径。请重新运行安装脚本（qodbuddy2pi install）`);
   }
   if (extensionInstalled()) {
     ok('pi-provider-qoder 已安装。要重装请先 pi uninstall pi-provider-qoder 再执行本命令');
     return 0;
   }
-  info(`从本仓库副本安装扩展：${vendor}`);
+  info(`从扩展副本安装：${vendor}`);
   const r = run('pi', ['install', vendor], { timeout: 300000, stdio: 'inherit' });
   if (r.status !== 0) fail('pi install 失败');
   ok('扩展已安装');
@@ -293,7 +293,7 @@ function cmdDoctor() {
   mark(piOk, `pi：${piOk ? run('pi', ['--version']).stdout || '可用' : '未找到'}`, '运行仓库的安装脚本');
   mark(extensionInstalled(), '扩展 pi-provider-qoder 已安装', '在本仓库运行 qoder2pi install-extension');
   const vendor = extensionPath();
-  mark(!!vendor, `仓库内的扩展副本：${vendor || '未知'}`, `重新运行安装脚本以写入 ${CONFIG}`);
+  mark(!!vendor, `扩展副本：${vendor || '未知'}`, `重新运行安装脚本以写入 ${CONFIG}`);
 
   for (const region of Object.values(REGIONS)) {
     const st = loginState(region);

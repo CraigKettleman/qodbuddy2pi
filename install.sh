@@ -376,19 +376,28 @@ install_qoder() {
   [ -f "$vendor/package.json" ] \
     || die "缺少本仓库自带的 qoder 扩展：${vendor}（请在完整仓库里运行本脚本）"
 
+  # 扩展先复制到 ~/.qoder2pi/vendor 再装：pi install 记录的是路径引用而不是副本
+  # （pi list 里能看到它指向哪），直接指向仓库或临时解压目录的话，仓库挪走、
+  # 或 release 包解压目录被删掉之后，provider 就失效了。
+  local stable="$HOME/.qoder2pi/vendor/pi-provider-qoder"
+  mkdir -p "$HOME/.qoder2pi/vendor"
+  rm -rf "$stable"
+  cp -R "$vendor" "$stable"
+
   if pi list 2>/dev/null | grep -qF 'pi-provider-qoder'; then
-    ok "pi-provider-qoder 已安装，跳过"
+    ok "pi-provider-qoder 已安装（副本已刷新到 ${stable}）"
   else
-    note "安装 pi-provider-qoder 扩展（来自本仓库 assets/vendor）"
-    pi install "$vendor"
+    note "安装 pi-provider-qoder 扩展（副本 ${stable}）"
+    pi install "$stable"
   fi
 
-  # 记下仓库路径：运维命令装到 ~/.local/bin 后不知道仓库在哪，「更新扩展」要用
+  # 记下路径：运维命令装到 ~/.local/bin 后不知道仓库在哪，「更新扩展」要用。
+  # vendorQoder 指向稳定副本而不是仓库，这样仓库删了也能重装扩展。
   mkdir -p "$HOME/.qoder2pi"
   cat > "$HOME/.qoder2pi/config.json" <<JSON
 {
   "repo": "$HERE",
-  "vendorQoder": "$vendor"
+  "vendorQoder": "$stable"
 }
 JSON
 

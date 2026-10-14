@@ -17,8 +17,10 @@
  * Qoder 没有服务、凭证直接落在 pi 的 auth.json，所以它的页管的是两个区域的
  * 登录状态，而不是账号切换。
  *
- * 接入（安装）不在这里：它是一条一次性流水线，走纯文本引导，由 install.sh
- * 或 install.ps1 负责。这里只做日常运维。
+ * 接入（安装）走 install.sh / install.ps1：那是一条一次性流水线，纯文本引导。
+ * 这里提供一个 install 子命令把它调起来，为了 npm 与 release 这两种装法——
+ * 它们只知道包目录，不知道仓库在哪，没有这个子命令就得让用户自己找脚本。
+ * 日常运维仍然只在这里。
  */
 
 'use strict';
@@ -140,6 +142,41 @@ function probe() {
  * 硬门槛：不满足就没法往下走，直接说清楚并退出。
  * 只检查真正硬的前提，可选依赖（uv、各个 provider 的登录）留给界面提示。
  */
+/**
+ * 跑包内自带的安装器（npm 全局安装与 release 压缩包都靠它）。
+ *
+ * 不实现第二份安装逻辑：直接 exec 同目录下的 install.sh / install.ps1，
+ * 参数原样转发。两个脚本本来就按「自己旁边有 assets/」写的，所以从
+ * 包目录跑和从仓库跑是同一条路径。
+ */
+function runInstaller(args) {
+  const isWin = process.platform === 'win32';
+  const name = isWin ? 'install.ps1' : 'install.sh';
+  // 安装器在包根目录（assets/ 的上一级），不是与入口同级
+  const candidates = [
+    path.join(__dirname, '..', name),
+    path.join(__dirname, name),
+  ];
+  const script = candidates.find((f) => fs.existsSync(f));
+  if (!script) {
+    log.fail(`找不到安装器 ${name}（找过 ${candidates.join(' 与 ')}）。` +
+      '若安装包不完整，请改用仓库里的 ./install.sh，或重新安装。');
+  }
+
+  const { spawnSync } = require('child_process');
+  let r;
+  if (isWin) {
+    // PowerShell 分两种可执行名：老系统只有 powershell.exe，pwsh 是 PowerShell 7。
+    const ps = findCmd('pwsh') || findCmd('powershell');
+    if (!ps) log.fail('找不到 PowerShell，无法运行 install.ps1');
+    r = spawnSync(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args],
+      { stdio: 'inherit' });
+  } else {
+    r = spawnSync('sh', [script, ...args], { stdio: 'inherit' });
+  }
+  process.exit(r.status === null ? 1 : r.status);
+}
+
 function preflight() {
   if (!findCmd('pi')) {
     log.warn('未找到 pi。');
@@ -170,6 +207,7 @@ function usage() {
   qodbuddy2pi            进入总控界面（不带参数且是终端时默认如此）
   qodbuddy2pi --check    只做环境检查（纯文本，适合脚本）
   qodbuddy2pi probe      以 JSON 报出本机已接入哪些 provider（供安装器调用）
+  qodbuddy2pi install    接入 provider（跑包内自带的安装器；npm / release 装法用这个）
   qodbuddy2pi --help     显示本帮助
 
 界面里用 1/2/3 或 Tab 切换三个 provider：
@@ -182,7 +220,8 @@ function usage() {
   qoder2pi                Qoder 页
   workbuddy2pi            WorkBuddy 国内版页
 
-要接入（安装）provider，跑仓库里的 ./install.sh（Windows 为 install.ps1）。`);
+接入 provider：仓库里直接跑 ./install.sh（Windows 为 install.ps1），
+npm 或 release 安装则跑 qodbuddy2pi install。两者是同一个安装器。`);
 }
 
 async function main() {
@@ -192,6 +231,9 @@ async function main() {
   if (cmd === '-h' || cmd === '--help' || cmd === 'help') return usage();
   if (cmd === '--check' || cmd === 'check') return process.exit(check() ? 1 : 0);
   if (cmd === 'probe') return probe();
+  // 接入 provider：把包内带的安装器跑起来，参数原样转发
+  // （--all / --only / --no-service / --non-interactive / --force-reinstall）
+  if (cmd === 'install') return runInstaller(argv.slice(1));
 
   // 无参数且是终端：过硬门槛后进总控
   if (!argv.length && process.stdout.isTTY && process.stdin.isTTY) {

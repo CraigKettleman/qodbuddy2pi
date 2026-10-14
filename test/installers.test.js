@@ -111,3 +111,67 @@ test('$var 紧跟中文标点的写法会踩 bash 的坑，install.sh 里不能�
     `install.sh 里有 $var 紧跟中文的写法，会解析成别的变量名:\n${offenders.join('\n')}`,
   );
 });
+
+// ---------------------------------------------------------------- 三种安装入口
+
+/**
+ * npm 与 release 两条路都靠 `qodbuddy2pi install` 把包内的安装器调起来。
+ * 这条链路断在哪一环都不会在开发机上显形（开发时都是直接跑 ./install.sh），
+ * 所以在这里钉住：子命令在、安装器找得到、npm 的 files 白名单把它带上了。
+ */
+test('qodbuddy2pi 有 install 子命令，且指向包内的同一个安装器', () => {
+  const entry = read('assets/qodbuddy2pi');
+  assert.match(entry, /cmd === 'install'/, '入口应识别 install 子命令');
+  assert.match(entry, /runInstaller/, '入口应有 runInstaller 实现');
+  // 必须去找 install.sh / install.ps1，而不是另写一套安装逻辑
+  assert.match(entry, /install\.sh/, 'runInstaller 应调 install.sh');
+  assert.match(entry, /install\.ps1/, 'runInstaller 应调 install.ps1');
+});
+
+test('npm 的 files 白名单带上了安装器与 vendored 依赖', () => {
+  const pkg = JSON.parse(read('package.json'));
+  const files = pkg.files || [];
+  for (const need of ['install.sh', 'install.ps1']) {
+    assert.ok(files.includes(need), `package.json 的 files 应包含 ${need}`);
+  }
+  assert.ok(
+    files.some((f) => f.startsWith('assets/vendor')),
+    'package.json 的 files 应包含 assets/vendor（扩展副本与反代 wheel）',
+  );
+  // bin 指向的入口也要被打包，否则 npm i -g 装出四个断链的命令
+  for (const target of Object.values(pkg.bin || {})) {
+    assert.ok(files.includes(target), `files 应包含 bin 入口 ${target}`);
+  }
+});
+
+test('release 包的 start.sh / start.cmd 调的是同一个安装器', () => {
+  const rel = read('make-release.sh');
+  assert.match(rel, /install\.sh/, 'start.sh 应调 install.sh');
+  assert.match(rel, /install\.ps1/, 'start.cmd 应调 install.ps1');
+  // 压缩包内容必须来自 npm pack，两边才不会漂移
+  assert.match(rel, /npm pack/, 'release 内容应来自 npm pack');
+});
+
+test('qoder 扩展装的是稳定副本，不是仓库或解压目录', () => {
+  // pi install 记录的是路径引用；指向仓库 / 临时解压目录的话，
+  // 仓库挪走或 release 包被删之后 provider 就失效了。
+  assert.match(SH, /\.qoder2pi\/vendor/, 'install.sh 应把扩展复制到 ~/.qoder2pi/vendor');
+  assert.match(PS1, /\\.qoder2pi\\vendor/, 'install.ps1 应把扩展复制到 ~/.qoder2pi/vendor');
+  // 两份脚本都不该把 vendorQoder 直接指到 $Here / $Res 下的源目录
+  assert.ok(
+    !/\"vendorQoder\": \"\$vendor\"/.test(SH),
+    'install.sh 的 vendorQoder 不该直接指向仓库里的源目录',
+  );
+});
+
+test('发布流程：打 tag 时同时出 npm 包与四个平台的压缩包', () => {
+  const wf = read('.github/workflows/release.yml');
+  assert.match(wf, /tags:/, 'workflow 应监听 tag');
+  assert.match(wf, /npm test/, '发布前应跑测试');
+  assert.match(wf, /npm publish/, '应发布到 npm');
+  assert.match(wf, /make-release\.sh --all/, '应生成四个平台的压缩包');
+  assert.match(wf, /SHA256SUMS/, '应产出校验值文件');
+  // 压缩包内容必须来自 npm pack，两条路径才不会漂移
+  const rel = read('make-release.sh');
+  assert.match(rel, /npm pack/, 'make-release.sh 内容应来自 npm pack');
+});

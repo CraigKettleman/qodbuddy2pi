@@ -308,18 +308,26 @@ function Install-Qoder($region, $title) {
     Write-Fail "缺少本仓库自带的 qoder 扩展: $vendor (请在完整仓库里运行本脚本)"
   }
 
+  # 扩展先复制到 ~\.qoder2pi\vendor 再装: pi install 记录的是路径引用而不是副本,
+  # 直接指向仓库或临时解压目录的话, 仓库挪走 / release 包解压目录被删之后 provider 就失效。
+  $stable = Join-Path $HOME ".qoder2pi\vendor\pi-provider-qoder"
+  New-Item -ItemType Directory -Force -Path (Join-Path $HOME ".qoder2pi\vendor") | Out-Null
+  if (Test-Path $stable) { Remove-Item -Recurse -Force $stable }
+  Copy-Item -Recurse -Force $vendor $stable
+
   $listed = & pi list 2>$null | Out-String
   if ($listed -match "pi-provider-qoder") {
-    Write-Ok "pi-provider-qoder 已安装, 跳过"
+    Write-Ok "pi-provider-qoder 已安装 (副本已刷新到 $stable)"
   } else {
-    Write-Note "安装 pi-provider-qoder 扩展 (来自本仓库 assets\vendor)"
-    & pi install $vendor
+    Write-Note "安装 pi-provider-qoder 扩展 (副本 $stable)"
+    & pi install $stable
   }
 
-  # 记下仓库路径: 运维命令装到 ~\.local\bin 后不知道仓库在哪, 「更新扩展」要用
+  # 记下路径: 运维命令装到 ~\.local\bin 后不知道仓库在哪, 「更新扩展」要用。
+  # vendorQoder 指向稳定副本而不是仓库, 这样仓库删了也能重装扩展。
   $cfgDir = Join-Path $HOME ".qoder2pi"
   New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
-  $cfg = @{ repo = $Here; vendorQoder = $vendor } | ConvertTo-Json
+  $cfg = @{ repo = $Here; vendorQoder = $stable } | ConvertTo-Json
   [System.IO.File]::WriteAllText((Join-Path $cfgDir "config.json"), $cfg,
     (New-Object System.Text.UTF8Encoding($false)))
 

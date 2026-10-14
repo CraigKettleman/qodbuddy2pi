@@ -2,7 +2,7 @@
 /**
  * workbuddy2pi — WorkBuddy 反代（codebuddy_proxy）的运维命令。
  *
- * 由 workbuddy2pi/install-workbuddy2pi.sh（或 .ps1）安装到用户 PATH 上，
+ * 由仓库根目录的 install.sh（Windows 为 install.ps1）安装到用户 PATH 上，
  * 也可以在仓库里直接执行：node workbuddy2pi/resources/bin/workbuddy2pi
  *
  * 平台：macOS（launchd）、Linux（systemd --user）、Windows（计划任务）。
@@ -220,7 +220,7 @@ function requireVendoredWheel() {
   if (!wheel) {
     fail(
       `未找到本地 vendored 依赖：${VENDOR_DIR} 下没有 workbuddy2api-*.whl\n` +
-        '      请先运行本仓库的 workbuddy2pi/install-workbuddy2pi.sh（或 .ps1）完成部署'
+        '      请先运行安装器完成部署：qodbuddy2pi install（或仓库里的 ./install.sh）'
     );
   }
   return wheel;
@@ -448,7 +448,7 @@ function windowsServeCmd(uv, wheel) {
 
 function installService() {
   const uv = findUv();
-  if (!uv) fail('未找到 uv，请先运行本仓库的 workbuddy2pi/install-workbuddy2pi.sh（或 .ps1）');
+  if (!uv) fail('未找到 uv，请先运行安装器：qodbuddy2pi install（或仓库里的 ./install.sh）');
   const wheel = requireVendoredWheel();
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(regionLogDir(), { recursive: true });
@@ -1099,12 +1099,12 @@ async function cmdDoctor() {
 
   mark(true, `Node.js ${process.version}`);
   const uv = findUv();
-  mark(!!uv, `uv：${uv || '未找到'}`, '运行 workbuddy2pi/install-workbuddy2pi.sh 安装');
+  mark(!!uv, `uv：${uv || '未找到'}`, '运行安装器安装：qodbuddy2pi install');
   const wheel = vendoredWheel();
   mark(
     !!wheel,
     `vendored 反代依赖：${wheel ? path.basename(wheel) : '未找到'}`,
-    '运行 workbuddy2pi/install-workbuddy2pi.sh 部署'
+    '运行安装器部署：qodbuddy2pi install'
   );
   mark(fs.existsSync(LIVE), `生效凭证文件：${LIVE}`, '先完成登录建档');
   const live = readJson(LIVE);
@@ -1301,8 +1301,7 @@ function usage() {
 
 用法：
   workbuddy2pi <命令> [参数]             国内版（端口 8787）
-  workbuddy2pi-global <命令> [参数]      国际版（端口 8788）
-  workbuddy2pi [global] <命令> [参数]    上面两种写法的等价形式，global 前缀留给脚本
+  workbuddy2pi global <命令> [参数]      国际版（端口 8788）
 
 不带命令时进入交互界面（仅在真终端里；管道或重定向会退回纯文本 status）。
 两个区域的服务、账号 slot 与日志完全独立，可以同时在线。
@@ -1324,12 +1323,12 @@ function usage() {
   doctor                 依赖与接入自检（失败时退出码非零）
 
 例：
-  workbuddy2pi                                国内版交互界面
-  workbuddy2pi-global                         国际版交互界面
+  workbuddy2pi                                国内版交互界面（总控第 2 页）
+  workbuddy2pi global                         国际版交互界面（总控第 3 页）
   workbuddy2pi account b                      切到国内版账号 b
-  workbuddy2pi-global account add             添加一个国际版账号（浏览器登录）
-  workbuddy2pi-global account a               切到国际版账号 a
-  workbuddy2pi-global status                  查看国际版状态（纯文本，适合脚本）
+  workbuddy2pi global account add             添加一个国际版账号（浏览器登录）
+  workbuddy2pi global account a               切到国际版账号 a
+  workbuddy2pi global status                  查看国际版状态（纯文本，适合脚本）
 
 供安装脚本调用（不宜手敲）：
   check-session          生效凭证有效则退出码 0，否则 1
@@ -1342,7 +1341,7 @@ function usage() {
 
 async function main() {
   const argv = process.argv.slice(2);
-  // region 有两个来源：被 workbuddy2pi-global 调起时带的环境变量，或首参数的 global 子命令。
+  // region 的来源：首参数的 global 子命令（别名入口已随 2.0.0 删掉，见 ADR 0005）。
   // 独立命令是给人用的，global 前缀留给脚本与旧习惯，两条都留。
   if ((process.env.WORKBUDDY_REGION || '').toLowerCase() === 'global') selectRegion('global');
   if ((argv[0] || '').toLowerCase() === 'global') {
@@ -1412,7 +1411,7 @@ async function main() {
 }
 
 // 被 require 时不自动执行命令行入口，否则总控 qodbuddy2pi 一 require 就会把
-// 自己的进程变成 CLI。要执行入口的 wrapper（workbuddy2pi-global）显式调 runCli()。
+// 自己的进程变成 CLI；qodbuddy2pi 这个总控只 require 它的页面定义。
 function runCli() {
   main().catch((e) => fail(e && e.stack ? e.stack : String(e)));
 }

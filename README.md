@@ -4,14 +4,14 @@
 
 </div>
 
-<p align="center">  
-    <em>把 Qoder 与 WorkBuddy 的订阅额度接进 pi coding agent。</em>  
+<p align="center">      
+    <em>把 Qoder 与 WorkBuddy 的订阅额度接进 pi coding agent。</em>      
 </p>
 
-<p align="center">  
-    <a href="https://github.com/CraigKettleman/qoder2pi/releases"><img src="https://img.shields.io/github/v/release/CraigKettleman/qoder2pi?style=flat-square\&label=release\&color=22c55e" alt="Latest release" /></a>  
-    <a href="https://www.npmjs.com/package/qodbuddy2pi"><img src="https://img.shields.io/npm/v/qodbuddy2pi?style=flat-square\&label=npm" alt="npm" /></a>  
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License" /></a>  
+<p align="center">      
+    <a href="https://github.com/CraigKettleman/qoder2pi/releases"><img src="https://img.shields.io/github/v/release/CraigKettleman/qoder2pi?style=flat-square\\\\\\\&label=release\\\\\\\&color=22c55e" alt="Latest release" /></a>      
+    <a href="https://www.npmjs.com/package/qodbuddy2pi"><img src="https://img.shields.io/npm/v/qodbuddy2pi?style=flat-square\\\\\\\&label=npm" alt="npm" /></a>      
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License" /></a>      
 </p>
 
 ## 这是什么
@@ -38,33 +38,50 @@ WorkBuddy 则在本机起一个反代（Python 写的 `codebuddy_proxy`，由 uv
 前置只有 **Node.js 22.19+** 与 **pi**，而这两样都不用自己装——安装脚本会调用 pi 的官方  
 安装方式，官方安装器在缺 Node 或版本不足时会自行安装。WorkBuddy 还需要 `uv`，也会自动装。
 
-**macOS / Linux**
+三种装法，装完之后完全一样，选顺手的那个：
+
+**npm（最省事）**
 
 ```bash
-./install.sh
+npm i -g qodbuddy2pi
+qodbuddy2pi install
 ```
 
-**Windows**
+**GitHub Release**
 
-```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
+到 [Releases](https://github.com/CraigKettleman/qoder2pi/releases) 下载对应平台的压缩包，  
+解开后跑：
+
+```bash
+./start.sh                       # macOS / Linux
+start.cmd                        # Windows
 ```
+
+**源码仓库**
+
+```bash
+git clone https://github.com/CraigKettleman/qoder2pi && cd qoder2pi
+./install.sh                     # macOS / Linux
+powershell -ExecutionPolicy Bypass -File install.ps1   # Windows
+```
+
+三条路最后都落到同一份安装器（`install.sh` / `install.ps1`），不存在三套逻辑：  
+npm 与 Release 只是把包放到本机，`qodbuddy2pi install` 和 `start.sh` 都是在调它。
 
 不带参数时会先探测本机现状（已登录哪个区域、哪个反代在跑），把结果列出来逐项确认，  
-回车采纳默认值。
+回车采纳默认值。参数三种装法通用：
 
 ```bash
-./install.sh --all             # 全装四个 provider
-./install.sh --only qoder-cn   # 只装指定的（逗号分隔或重复 --only）
-./install.sh --no-service      # 只装接入，不注册常驻服务
-./install.sh --non-interactive # 不提问，按探测结果装
+--all             # 全装四个 provider
+--only qoder-cn   # 只装指定的（逗号分隔或重复 --only）
+--no-service      # 只装接入，不注册常驻服务
+--non-interactive # 不提问，按探测结果装
+--force-reinstall # 即使已接入也重装一遍
 ```
 
-也可以在 GitHub Release 里下载压缩包，解开后跑 `./start.sh`（Windows 用 `start.cmd`），  
-或 `npm i -g qodbuddy2pi`。这三个入口都只是「拿到仓库 + 调用同一个安装器」。
-
 <details>
-<summary><strong>两个平台的差异都在哪里</strong>  
+
+<summary><strong>两个平台的差异都在哪里</strong>      
    </summary>
 
 两份安装脚本步骤一一对应，区别只在平台本身：
@@ -90,6 +107,7 @@ Windows 上要靠它执行 bash 命令。
 ```bash
 qodbuddy2pi              # 总控界面：1/2/3 或 Tab 切 provider
 qodbuddy2pi --check      # 只看环境检查（纯文本，适合脚本）
+qodbuddy2pi install      # 接入 / 重装 provider（跑包内自带的安装器）
 ```
 
 别名打开的是同一个总控，只是焦点预落在对应页：
@@ -136,7 +154,7 @@ workbuddy2pi doctor             # 自检
 
 <details>
 
-<summary><strong>原理</strong>  
+<summary><strong>原理</strong>      
    </summary>
 
 ```
@@ -157,7 +175,7 @@ Qoder 没有这一层：扩展直接跟 Qoder 网关通信。
 
 <details>
 
-<summary><strong>依赖都固定在本仓库</strong>  
+<summary><strong>依赖都固定在本仓库</strong>      
    </summary>
 
 两个 provider 的实现本体都在仓库里，安装脚本不会从别的仓库拉取：

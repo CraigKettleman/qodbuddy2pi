@@ -18,8 +18,13 @@
 qodbuddy2pi             # 总控界面（1/2/3 或 Tab 切 provider）
 qodbuddy2pi --check     # 环境检查（纯文本，适合脚本）
 qodbuddy2pi probe       # 以 JSON 报出已接入哪些 provider
+qodbuddy2pi install     # 接入 provider（跑包内自带的安装器，参数与 install.sh 一致）
 qodbuddy2pi --help
 ```
+
+`install` 不是运维动作，而是安装入口：npm 与 release 两种装法只有包目录、没有仓库，
+它就是用来把包内那份 `install.sh` / `install.ps1` 调起来的。源码仓库里直接跑
+`./install.sh` 也一样，两者是同一个文件。
 
 总控界面只在真终端里启用；管道或重定向时会退回纯文本，方便脚本调用。
 

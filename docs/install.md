@@ -14,51 +14,92 @@ Qoder 不需要 uv。
 
 ## 安装
 
-**macOS / Linux**：
+三种装法，效果完全一样，选顺手的那个。
+
+**npm**：
 
 ```bash
-./install.sh
+npm i -g qodbuddy2pi
+qodbuddy2pi install
 ```
 
-**Windows**：
+`npm i -g` 只把包放到本机（四个命令进 PATH），不碰你的 pi 配置；接入是显式的第二步。
+这样 npm 的 postinstall 不会在 CI、离线环境或 `--ignore-scripts` 下静默失败，你也能
+先把包装上、看清它要动什么再决定接哪些 provider。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
+**GitHub Release**：
+
+到 Releases 页下载对应平台的压缩包（`qodbuddy2pi-<版本>-<平台>.tar.gz`，Windows 是
+`.zip`），解开后：
+
+```bash
+./start.sh                         # macOS / Linux
+start.cmd                          # Windows
 ```
+
+同一个 Release 里带 `SHA256SUMS`，想核对的话：
+
+```bash
+shasum -a 256 -c SHA256SUMS        # macOS / Linux（Windows 用 certutil 或 Get-FileHash）
+```
+
+**源码仓库**：
+
+```bash
+./install.sh                       # macOS / Linux
+powershell -ExecutionPolicy Bypass -File install.ps1   # Windows
+```
+
+三条路最后都是同一份安装器：`qodbuddy2pi install` 与 `start.sh` 都是去调包内的
+`install.sh` / `install.ps1`。不只是「都差不多」——它们真的是同一个文件，所以不存在
+某一条路径漏了步骤的问题。
 
 不带参数时会先探测本机现状（已登录哪个区域、哪个反代在跑），把结果列出来逐项确认，
-回车采纳默认值。
-
-也可以用参数跳过提问：
+回车采纳默认值。参数三种装法通用：
 
 ```bash
-./install.sh --all                 # 全装四个 provider
-./install.sh --only qoder-cn       # 只装指定的（可逗号分隔，也可重复 --only）
-./install.sh --no-service          # 只装接入，不注册常驻服务
-./install.sh --force-reinstall     # 即使已接入也重装一遍
-./install.sh --non-interactive     # 不提问，按探测结果装
-./install.sh --help
+--all                 # 全装四个 provider
+--only qoder-cn       # 只装指定的（可逗号分隔，也可重复 --only）
+--no-service          # 只装接入，不注册常驻服务
+--force-reinstall     # 即使已接入也重装一遍
+--non-interactive     # 不提问，按探测结果装
+--help
 ```
 
 Windows 上对应的参数是 `-All`、`-Only`、`-NoService`、`-ForceReinstall`、
-`-NonInteractive`。
+`-NonInteractive`；`-File install.ps1` 换成 `qodbuddy2pi install` 即可。
 
-### 一行安装
+### 为什么 npm 要分两步
 
-除了仓库里的脚本，还有三种等价入口，它们都只是「拿到仓库 + 调用同一个安装器」，
-不重写安装逻辑：
+`npm i -g` 只放命令，接入是 `qodbuddy2pi install`，这是刻意的：npm 的 `postinstall`
+在 CI、离线环境、以及设了 `--ignore-scripts` 的机器上都会静默失败，而安装器需要提问
+（装哪些 provider、要不要写 PATH），非交互环境里只能默默按默认值走。分成两步之后，
+装包永远不会失败，接入则在你眼前跑。
+
+同理，release 包里 `start.sh` 也不直接开界面，而是调安装器——解压后第一次用应该是
+「装好」，而不是进一个什么都还没接入的界面。见
+[docs/adr/0006](adr/0006-one-liner-downloads-then-execs.md)。
+
+## 发布是怎么产生的
+
+打 `v*` tag 会触发 `.github/workflows/release.yml`：先跑测试，再发 npm 包，最后用
+`make-release.sh --all` 生成四个平台的压缩包并附到 GitHub Release，同时产出
+`SHA256SUMS`。
+
+压缩包的内容来自 `npm pack`，与 npm 上发布的包是同一份文件集合——不存在「npm 上是
+新的、Release 上是旧的」这种漂移。版本号以 tag 为准，发布时用
+`npm version "${GITHUB_REF_NAME#v}"` 校准，不用手工同步 `package.json`。
+
+没有配置 `NPM_TOKEN` secret 时 npm 那步会跳过并打印说明，Release 照常生成。
+
+本地想自己打一份：
 
 ```bash
-# npm（命令装好后仍需跑安装器来部署服务与登录）
-npm i -g qodbuddy2pi && qodbuddy2pi probe
-
-# GitHub Release：解开后跑 ./start.sh（Windows 用 start.cmd）
-tar -xzf qodbuddy2pi-<版本>-<平台>.tar.gz && cd qodbuddy2pi-<版本>-<平台> && ./start.sh
+./make-release.sh            # 当前平台
+./make-release.sh --all      # 四个平台
 ```
 
-`start.sh` 调的就是 `install.sh`。之所以要这样分两层，是因为 `curl … | sh` 时 stdin
-被脚本本身占用，任何提问都会立刻读到 EOF；所以真正需要提问的安装器必须拿到干净终端
-才能跑起来。见 [docs/adr/0006](adr/0006-one-liner-downloads-then-execs.md)。
+产物在 `release/`（已 gitignore），末尾会打印 SHA256。
 
 ## 安装器会做什么
 
