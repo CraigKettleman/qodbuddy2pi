@@ -20,6 +20,16 @@ const path = require('node:path');
 
 const TUI = path.join(__dirname, '..', 'assets', 'tui.js');
 
+// 把色彩能力固定成真彩再加载 tui.js。
+//
+// 主题在模块加载时按环境变量定一次（NO_COLOR / COLORTERM / TERM），CI 里这些
+// 通常是空的，于是 SELECT_BG 变成空串——「滚轮改变选中项」那条测试靠底色找
+// 选中行，就会在 CI 上假红。选中高亮本身是我们要验的行为，与运行环境的色彩
+// 能力无关，所以这里钉住真彩。
+process.env.COLORTERM = 'truecolor';
+delete process.env.NO_COLOR;
+process.env.TERM = 'xterm-256color';
+
 /**
  * 一次性把界面渲染出来并取回「最终屏幕」的行数组。
  *
@@ -309,9 +319,10 @@ test('滚轮改变选中项，而不是让终端滚屏', async () => {
   const tuiRef = require(TUI);
   const base = await withInput([], 100, 26, MENU_OPTS);
   const after = await withInput(['\x1b[<65;20;10M'], 100, 26, MENU_OPTS);
-  // 选中行带 selectedBg 底色。底色序列随终端色彩能力变化（真彩/256/16），
-  // 从模块里取；再从最终屏幕（而不是某一段差分）里找带底色的那一行。
-  const pickLines = (r) => r.lines.filter((l) => l.includes(tuiRef.SELECT_BG || '\u001b[48;5;'));
+  // 选中行带 selectedBg 底色。色彩能力已在文件开头钉成真彩，所以这里能直接
+  // 用模块导出的 SELECT_BG；再从最终屏幕（而不是某一段差分）里找带底色的行。
+  assert.ok(tuiRef.SELECT_BG, 'SELECT_BG 应有值（测试开头已固定为真彩）');
+  const pickLines = (r) => r.lines.filter((l) => l.includes(tuiRef.SELECT_BG));
   const pick = (r) => {
     const hit = pickLines(r).pop() || '';
     return hit.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
