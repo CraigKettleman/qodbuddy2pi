@@ -49,19 +49,18 @@ curl -fsSL https://raw.githubusercontent.com/CraigKettleman/qoder2pi/main/instal
 irm https://raw.githubusercontent.com/CraigKettleman/qoder2pi/main/install.ps1 | iex
 ```
 
-**npm / pnpm / bun**（包管理器装了的话，这三条等价）
+
+**npm / pnpm / bun**
 
 ```bash
 npm i -g --ignore-scripts qodbuddy2pi && qodbuddy2pi install
 pnpm add -g --ignore-scripts qodbuddy2pi && qodbuddy2pi install
 bun add -g --ignore-scripts qodbuddy2pi && qodbuddy2pi install
+# 或 npx --yes qodbuddy2pi install
 ```
 
-或者用 `npx`，不装到全局：
-
-```bash
-npx --yes qodbuddy2pi install
-```
+`--ignore-scripts` 是刻意的：包本身不该在安装时改动你的 pi 配置。接入是显式的
+`qodbuddy2pi install`，你在眼前看到它要装什么。
 
 **下载压缩包**
 
