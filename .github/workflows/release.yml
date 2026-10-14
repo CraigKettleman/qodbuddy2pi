@@ -76,6 +76,14 @@ jobs:
           cd release
           shasum -a 256 ./*.tar.gz ./*.zip > SHA256SUMS
           cat SHA256SUMS
+      - name: 确认稳定文件名都在（一行安装依赖它们）
+        run: |
+          cd release
+          for f in qodbuddy2pi-darwin-arm64.tar.gz qodbuddy2pi-darwin-x64.tar.gz \
+                   qodbuddy2pi-linux-x64.tar.gz qodbuddy2pi-win32-x64.zip; do
+            test -f "$f" || { echo "缺少 $f，releases/latest/download 的固定 URL 会 404"; exit 1; }
+          done
+          echo "稳定文件名齐全" 
       - name: 附到 GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:

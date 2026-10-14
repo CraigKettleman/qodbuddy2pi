@@ -66,6 +66,15 @@ SH
              tar -czf "$archive" -C "$TMP" "$NAME-$target" ;;
   esac
   echo "    $archive  ($(du -h "$archive" | cut -f1))"
+
+  # 再放一份「不带版本号」的副本。一行安装要用
+  #   .../releases/latest/download/qodbuddy2pi-<平台>.tar.gz
+  # 这种固定文件名，latest/download 才会永远指向最新版；带版本号的名字每次
+  # 发版都变，URL 就没法写进文档。
+  case "$target" in
+    win32-*) cp "$archive" "$OUT/qodbuddy2pi-$target.zip" ;;
+    *)       cp "$archive" "$OUT/qodbuddy2pi-$target.tar.gz" ;;
+  esac
 done
 
 echo

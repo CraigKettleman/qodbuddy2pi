@@ -14,23 +14,36 @@ Qoder 不需要 uv。
 
 ## 安装
 
-三种装法，效果完全一样，选顺手的那个。
+一条命令，不用克隆仓库。五种入口，装完之后完全一样。
 
-**npm**：
+**macOS / Linux（一行流）**：
 
 ```bash
-npm i -g qodbuddy2pi
-qodbuddy2pi install
+curl -fsSL https://raw.githubusercontent.com/CraigKettleman/qoder2pi/main/install.sh | sh
 ```
 
-`npm i -g` 只把包放到本机（四个命令进 PATH），不碰你的 pi 配置；接入是显式的第二步。
-这样 npm 的 postinstall 不会在 CI、离线环境或 `--ignore-scripts` 下静默失败，你也能
-先把包装上、看清它要动什么再决定接哪些 provider。
+**Windows（一行流）**：
 
-**GitHub Release**：
+```powershell
+irm https://raw.githubusercontent.com/CraigKettleman/qoder2pi/main/install.ps1 | iex
+```
 
-到 Releases 页下载对应平台的压缩包（`qodbuddy2pi-<版本>-<平台>.tar.gz`，Windows 是
-`.zip`），解开后：
+**npm / pnpm / bun**：
+
+```bash
+npm i -g --ignore-scripts qodbuddy2pi && qodbuddy2pi install
+pnpm add -g --ignore-scripts qodbuddy2pi && qodbuddy2pi install
+bun add -g --ignore-scripts qodbuddy2pi && qodbuddy2pi install
+```
+
+**npx（不装到全局）**：
+
+```bash
+npx --yes qodbuddy2pi install
+```
+
+**下载压缩包**：到 Releases 页下载 `qodbuddy2pi-<平台>.tar.gz`（Windows 是 `.zip`），
+解开后：
 
 ```bash
 ./start.sh                         # macOS / Linux
@@ -40,22 +53,23 @@ start.cmd                          # Windows
 同一个 Release 里带 `SHA256SUMS`，想核对的话：
 
 ```bash
-shasum -a 256 -c SHA256SUMS        # macOS / Linux（Windows 用 certutil 或 Get-FileHash）
+shasum -a 256 -c SHA256SUMS        # macOS / Linux（Windows 用 Get-FileHash）
 ```
 
-**源码仓库**：
+**从源码**：
 
 ```bash
+git clone https://github.com/CraigKettleman/qoder2pi && cd qoder2pi
 ./install.sh                       # macOS / Linux
 powershell -ExecutionPolicy Bypass -File install.ps1   # Windows
 ```
 
-三条路最后都是同一份安装器：`qodbuddy2pi install` 与 `start.sh` 都是去调包内的
-`install.sh` / `install.ps1`。不只是「都差不多」——它们真的是同一个文件，所以不存在
-某一条路径漏了步骤的问题。
+三条路最后都是同一份安装器：`qodbuddy2pi install`、`start.sh`、以及一行流里的引导器，
+都是去调包内的 `install.sh` / `install.ps1`。不只是「都差不多」——它们真的是同一个
+文件，所以不存在某一条路径漏了步骤的问题。
 
 不带参数时会先探测本机现状（已登录哪个区域、哪个反代在跑），把结果列出来逐项确认，
-回车采纳默认值。参数三种装法通用：
+回车采纳默认值。参数所有入口通用：
 
 ```bash
 --all                 # 全装四个 provider
@@ -68,6 +82,23 @@ powershell -ExecutionPolicy Bypass -File install.ps1   # Windows
 
 Windows 上对应的参数是 `-All`、`-Only`、`-NoService`、`-ForceReinstall`、
 `-NonInteractive`；`-File install.ps1` 换成 `qodbuddy2pi install` 即可。
+
+### 一行流的引导层
+
+`curl … | sh` 这条路有个固有限制：`sh` 从管道读脚本，stdin 被脚本本身占着，任何提问
+都会立刻读到 EOF。所以 `install.sh` 开头会先判断「自己身边有没有 `assets/`」：
+
+- 有（仓库内运行、release 包里的 `start.sh`）→ 直接当安装器跑；
+- 没有（从管道跑）→ 下载对应平台的 release 压缩包到临时目录，把终端接回来
+  （`< /dev/tty`），再 `exec` 里面那份安装器。
+
+于是提问发生在真正的安装器里，拿到的是干净终端。没有可用终端时（CI、容器）自动退成
+`--non-interactive`，不会挂住。Windows 的 `irm | iex` 终端本来就在（不需要抢回），
+但 `iex` 下 `$MyInvocation.MyCommand.Path` 是空的，所以同样先下载解压再 `-File` 执行。
+
+引导层下载的是固定文件名（`qodbuddy2pi-<平台>.tar.gz`），所以 URL 能写成
+`releases/latest/download/...` 并在每次发版后自动指向最新版。带版本号的那份也一并
+发布，供需要锁定版本的场景使用。
 
 ### 为什么 npm 要分两步
 

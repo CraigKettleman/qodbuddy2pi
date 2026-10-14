@@ -35,29 +35,40 @@ WorkBuddy 则在本机起一个反代（Python 写的 `codebuddy_proxy`，由 uv
 
 ## 安装
 
-前置只有 **Node.js 22.19+** 与 **pi**，而这两样都不用自己装——安装脚本会调用 pi 的官方  
-安装方式，官方安装器在缺 Node 或版本不足时会自行安装。WorkBuddy 还需要 `uv`，也会自动装。
+一条命令，不用克隆仓库。
 
-三种装法，装完之后完全一样，选顺手的那个：
-
-**npm（最省事）**
+**macOS / Linux**
 
 ```bash
-npm i -g qodbuddy2pi
-qodbuddy2pi install
+curl -fsSL https://raw.githubusercontent.com/CraigKettleman/qoder2pi/main/install.sh | sh
 ```
 
-**GitHub Release**
+**Windows**
 
-到 [Releases](https://github.com/CraigKettleman/qoder2pi/releases) 下载对应平台的压缩包，  
-解开后跑：
+```powershell
+irm https://raw.githubusercontent.com/CraigKettleman/qoder2pi/main/install.ps1 | iex
+```
+
+**npm / pnpm / bun**（包管理器装了的话，这三条等价）
 
 ```bash
-./start.sh                       # macOS / Linux
-start.cmd                        # Windows
+npm i -g --ignore-scripts qodbuddy2pi && qodbuddy2pi install
+pnpm add -g --ignore-scripts qodbuddy2pi && qodbuddy2pi install
+bun add -g --ignore-scripts qodbuddy2pi && qodbuddy2pi install
 ```
 
-**源码仓库**
+或者用 `npx`，不装到全局：
+
+```bash
+npx --yes qodbuddy2pi install
+```
+
+**下载压缩包**
+
+到 [Releases](https://github.com/CraigKettleman/qoder2pi/releases) 下载对应平台的包
+（`qodbuddy2pi-<平台>.tar.gz` / `.zip`），解开后跑 `./start.sh`（Windows 是 `start.cmd`）。
+
+**从源码**
 
 ```bash
 git clone https://github.com/CraigKettleman/qoder2pi && cd qoder2pi
@@ -65,42 +76,13 @@ git clone https://github.com/CraigKettleman/qoder2pi && cd qoder2pi
 powershell -ExecutionPolicy Bypass -File install.ps1   # Windows
 ```
 
-三条路最后都落到同一份安装器（`install.sh` / `install.ps1`），不存在三套逻辑：  
-npm 与 Release 只是把包放到本机，`qodbuddy2pi install` 和 `start.sh` 都是在调它。
+这些入口背后是同一份安装器。前两条一行流是引导器：它把对应平台的压缩包下到临时目录，
+把终端交给自己，再跑里面那份 `install.sh` / `install.ps1`——和 pi 自己的官方安装器同一
+套做法（`curl … | sh` 时 stdin 被脚本占着，提问必须发生在真正的安装器里，见
+[docs/adr/0006](docs/adr/0006-one-liner-downloads-then-execs.md)）。
 
-不带参数时会先探测本机现状（已登录哪个区域、哪个反代在跑），把结果列出来逐项确认，  
-回车采纳默认值。参数三种装法通用：
-
-```bash
---all             # 全装四个 provider
---only qoder-cn   # 只装指定的（逗号分隔或重复 --only）
---no-service      # 只装接入，不注册常驻服务
---non-interactive # 不提问，按探测结果装
---force-reinstall # 即使已接入也重装一遍
-```
-
-<details>
-
-<summary><strong>两个平台的差异都在哪里</strong>      
-   </summary>
-
-两份安装脚本步骤一一对应，区别只在平台本身：
-
-|        | `install.sh`                           | `install.ps1`                           |
-| ------ | -------------------------------------- | --------------------------------------- |
-| 装 pi   | `curl … pi.dev/install.sh \| sh`       | `irm … pi.dev/install.ps1 \| iex`       |
-| 命令目录   | `~/.local/bin`                         | `%USERPROFILE%\.local\bin`              |
-| 写 PATH | 登录 shell 的 rc 文件（zsh/bash/fish 各自对应）   | HKCU 的 User PATH，不需要管理员权限               |
-| 常驻服务   | launchd（macOS）/ systemd --user（Linux）  | 登录触发的计划任务                               |
-| 装 uv   | `curl … astral.sh/uv/install.sh \| sh` | `irm … astral.sh/uv/install.ps1 \| iex` |
-| 界面     | 同一份 `tui.js`                           | 同一份 `tui.js`                            |
-
-写 PATH 之前会把要改的文件、要追加的那一行打印出来，问过你才动手。
-
-Windows 上 pi 的 shell 工具依赖 Git Bash（pi 的官方安装器会引导安装），因为 pi 在原生  
-Windows 上要靠它执行 bash 命令。
-
-</details>
+不带参数时会先探测本机现状（已登录哪个区域、哪个反代在跑），把结果列出来逐项确认，
+回车采纳默认值。参数所有入口通用：
 
 ## 日常使用
 

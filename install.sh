@@ -21,10 +21,78 @@
 # pi 本身用官方安装方式装（macOS / Linux 上就是 pi.dev 的那条 curl），
 # 不再自己装 Node：官方安装器会按需安装 Node 并强制 22.19+。
 #
-# 从管道运行时（curl … | sh）：本脚本只负责下载与 exec，真正的安装器拿到
-# 干净终端后再提问。见 docs/adr/0006。
+# 一行安装（不用克隆仓库）：
+#
+#   curl -fsSL https://raw.githubusercontent.com/CraigKettleman/qoder2pi/main/install.sh | sh
+#
+# 这条管道里 sh 从 stdin 读脚本，stdin 被脚本自己占着，任何提问都会立刻读到
+# EOF。所以脚本先判断「身边有没有 assets/」：没有（即从管道跑）就下载对应平台
+# 的压缩包到临时目录，把终端交给自己（< /dev/tty），再 exec 里面的同一份安装器。
+# 提问因此发生在真正的安装器里，拿到的是干净终端。见 docs/adr/0006。
 # ============================================================
 set -euo pipefail
+
+REPO_SLUG="CraigKettleman/qoder2pi"
+
+# ------------------------------------------------------------ 一行安装引导
+#
+# 只在「没有 assets/」时触发：从管道跑、或单独把 install.sh 拷出来跑。
+# 仓库内 ./install.sh、curl|sh、release 包里的 start.sh 最后都落到同一个安装器。
+# 从管道跑时 BASH_SOURCE[0] 是空的（bash 从 stdin 读脚本，没有文件名），
+# 这是判断「在不在仓库里」唯一可靠的信号——用 $0 不行：管道下 $0 是 "bash"，
+# dirname 出来的 "." 正好等于当前目录，仓库里跑管道会被误判成仓库内运行。
+_self="${BASH_SOURCE[0]-}"
+if [ -z "${QODBUDDY_BOOTSTRAPPED:-}" ] && { [ -z "$_self" ] || [ ! -f "$(dirname "$_self")/assets/tui.js" ]; }; then
+  bootstrap() {
+    echo "==> QodBuddy2Pi 安装器"
+    print_platform_hint() { :; }
+
+    case "$(uname -s)" in
+      Darwin) os=darwin ;;
+      Linux)  os=linux ;;
+      *) echo "错误: 不支持的系统 $(uname -s)。Windows 请用 install.ps1。" >&2; exit 1 ;;
+    esac
+    case "$(uname -m)" in
+      arm64|aarch64) arch=arm64 ;;
+      x86_64|amd64)  arch=x64 ;;
+      *) echo "错误: 不支持的架构 $(uname -m)" >&2; exit 1 ;;
+    esac
+
+    asset="qodbuddy2pi-$os-$arch.tar.gz"
+    # QODBUDDY_RELEASE_URL 用来指向别处（自建镜像、内网、测试）；平时就是 GitHub
+    # 的 latest/download 固定名，所以这个 URL 永远指向最新版。
+    url="${QODBUDDY_RELEASE_URL:-https://github.com/$REPO_SLUG/releases/latest/download}/$asset"
+
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    echo "==> 下载 $asset"
+    if ! curl -fsSL "$url" -o "$tmp/pkg.tar.gz"; then
+      echo "错误: 下载失败：$url" >&2
+      echo "      可能还没有对应平台的 release。可以改用克隆仓库的方式：" >&2
+      echo "        git clone https://github.com/$REPO_SLUG && cd qoder2pi && ./install.sh" >&2
+      exit 1
+    fi
+    tar -xzf "$tmp/pkg.tar.gz" -C "$tmp"
+
+    inner="$(find "$tmp" -maxdepth 2 -name install.sh -path '*/qodbuddy2pi-*' | head -1)"
+    [ -n "$inner" ] || { echo "错误: 压缩包里没找到 install.sh" >&2; exit 1; }
+
+    echo "==> 进入安装器（下面开始提问）"
+    # 把真终端接回来：脚本是从管道读的，stdin 已经不在终端上了。
+    # 没有终端（CI）时保持原样，安装器会按探测结果全自动、不提问。
+    # /dev/tty 存在不等于能用（CI、某些容器里它是 "Device not configured"），
+    # 所以真的试着打开一下再决定：能打开才把终端交过去，否则当作无终端处理。
+    if { : < /dev/tty; } 2>/dev/null; then
+      QODBUDDY_BOOTSTRAPPED=1 exec "$inner" "$@" < /dev/tty
+    else
+      echo "    （没有可用终端，按探测结果全自动安装）"
+      QODBUDDY_BOOTSTRAPPED=1 exec "$inner" "$@" --non-interactive
+    fi
+  }
+  bootstrap "$@"
+  exit $?
+fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RES="$HERE/assets"

@@ -53,6 +53,56 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# ------------------------------------------------------------ 一行安装引导
+#
+# Windows 的一行流是 irm ... | iex，脚本在 pwsh 会话里求值，终端还在（这点与
+# bash 的 curl|sh 不同，不需要把 /dev/tty 抢回来）。但从 iex 跑时
+# $MyInvocation.MyCommand.Path 是空的，旁边也没有 assets/，所以这里先下载
+# 对应平台的 zip 解到临时目录，再用 -File 跑里面那份真正的安装器。
+# 仓库内直接跑、release 包里的 start.cmd 都跳过这段。
+$ScriptPath = $MyInvocation.MyCommand.Path
+$NeedsBootstrap = $env:QODBUDDY_BOOTSTRAPPED -ne "1" -and (
+  [string]::IsNullOrWhiteSpace($ScriptPath) -or
+  -not (Test-Path (Join-Path (Split-Path -Parent $ScriptPath) "assets\tui.js"))
+)
+
+if ($NeedsBootstrap) {
+  Write-Host "==> QodBuddy2Pi 安装器"
+  $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+  $asset = "qodbuddy2pi-win32-$arch.zip"
+  $base = if ($env:QODBUDDY_RELEASE_URL) { $env:QODBUDDY_RELEASE_URL } else {
+    "https://github.com/CraigKettleman/qoder2pi/releases/latest/download"
+  }
+  $url = "$base/$asset"
+
+  $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("qodbuddy2pi-" + [System.Guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+  $zip = Join-Path $tmp "pkg.zip"
+
+  Write-Host "==> 下载 $asset"
+  try {
+    Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+  } catch {
+    Write-Host "错误: 下载失败：$url" -ForegroundColor Red
+    Write-Host "      可能还没有对应平台的 release。也可以改用克隆仓库的方式：" -ForegroundColor Red
+    Write-Host "        git clone https://github.com/CraigKettleman/qoder2pi; cd qoder2pi; .\install.ps1" -ForegroundColor Red
+    exit 1
+  }
+  Expand-Archive -Path $zip -DestinationPath $tmp -Force
+
+  $inner = Get-ChildItem -Path $tmp -Recurse -Filter "install.ps1" |
+           Where-Object { $_.Directory.Name -like "qodbuddy2pi-*" } |
+           Select-Object -First 1
+  if (-not $inner) { Write-Host "错误: 压缩包里没找到 install.ps1" -ForegroundColor Red; exit 1 }
+
+  Write-Host "==> 进入安装器（下面开始提问）"
+  $env:QODBUDDY_BOOTSTRAPPED = "1"
+  & pwsh -NoProfile -ExecutionPolicy Bypass -File $inner.FullName @args
+  $code = $LASTEXITCODE
+  Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+  exit $code
+}
+
 $Here    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Res     = Join-Path $Here "assets"
 $BinDir  = Join-Path $HOME ".local\bin"

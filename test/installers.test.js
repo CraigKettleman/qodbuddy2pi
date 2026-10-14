@@ -175,3 +175,31 @@ test('发布流程：打 tag 时同时出 npm 包与四个平台的压缩包', (
   const rel = read('make-release.sh');
   assert.match(rel, /npm pack/, 'make-release.sh 内容应来自 npm pack');
 });
+
+test('一行流：没有 assets/ 时自己下载 release 再 exec 真正的安装器', () => {
+  // curl … | sh 时 stdin 被脚本占着，必须先下载再拿回终端，见 ADR 0006。
+  assert.match(SH, /BOOTSTRAPPED/, 'install.sh 应有一行流引导层（带哨兵变量防止递归）');
+  assert.match(SH, /releases\/latest\/download/, '引导层应下载 latest release');
+  assert.match(SH, /dev\/tty/, '引导层应把终端接回来，否则提问读不到输入');
+  assert.match(SH, /--non-interactive/, '没有终端时应退成全自动，不能挂住');
+
+  assert.match(PS1, /BOOTSTRAPPED/, 'install.ps1 应有一行流引导层');
+  assert.match(PS1, /releases\/latest\/download/, 'install.ps1 引导层应下载 latest release');
+  assert.match(PS1, /Expand-Archive/, 'install.ps1 引导层应解压后执行');
+});
+
+test('release 同时产出固定文件名，一行流的 URL 才能长期有效', () => {
+  const rel = read('make-release.sh');
+  // .../releases/latest/download/qodbuddy2pi-<平台>.tar.gz 这种 URL 要求文件名不带版本号
+  assert.match(rel, /qodbuddy2pi-\$target/, 'make-release.sh 应另存一份不带版本号的副本');
+  // CI 里要确认这些固定名真的在，否则一行流 404
+  const wf = read('.github/workflows/release.yml');
+  assert.match(wf, /qodbuddy2pi-darwin-arm64\.tar\.gz|稳定文件名/, 'workflow 应校验固定文件名存在');
+});
+
+test('README 首页给出一行安装命令（不必先克隆仓库）', () => {
+  const readme = read('README.md');
+  assert.match(readme, /curl -fsSL \S+install\.sh \| sh/, 'README 应有 curl|sh 一行安装');
+  assert.match(readme, /irm \S+install\.ps1 \| iex/, 'README 应有 irm|iex 一行安装');
+  assert.match(readme, /npm i -g/, 'README 应有 npm 安装');
+});
