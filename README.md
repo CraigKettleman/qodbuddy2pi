@@ -13,12 +13,12 @@
 </p>
 
 <p align="center">  
-    <a href="https://github.com/CraigKettleman/qoder2pi/releases"><img src="https://img.shields.io/github/v/release/CraigKettleman/qoder2pi?style=flat-square\&label=release\&color=22c55e" alt="Latest release" /></a>  
-    <a href="https://www.npmjs.com/package/qodbuddy2pi"><img src="https://img.shields.io/npm/v/qodbuddy2pi?style=flat-square\&label=npm\&color=cb3837" alt="npm" /></a>  
-    <a href="https://github.com/CraigKettleman/qoder2pi/releases"><img src="https://img.shields.io/github/downloads/CraigKettleman/qoder2pi/total?style=flat-square\&color=22c55e" alt="Total downloads" /></a>  
-    <img src="https://img.shields.io/badge/Windows-10%2B-0078D4?style=flat-square\&logo=windows\&logoColor=white" alt="Windows 10 or later" />  
-    <img src="https://img.shields.io/badge/macOS-12%2B-0A84FF?style=flat-square\&logo=apple\&logoColor=white" alt="macOS 12 or later" />  
-    <img src="https://img.shields.io/badge/Linux-x64-64748b?style=flat-square\&logo=linux\&logoColor=white" alt="Linux x64" />  
+    <a href="https://github.com/CraigKettleman/qoder2pi/releases"><img src="https://img.shields.io/github/v/release/CraigKettleman/qoder2pi?style=flat-square&label=release&color=22c55e" alt="Latest release" /></a>  
+    <a href="https://www.npmjs.com/package/qodbuddy2pi"><img src="https://img.shields.io/npm/v/qodbuddy2pi?style=flat-square&label=npm&color=cb3837" alt="npm" /></a>  
+    <a href="https://github.com/CraigKettleman/qoder2pi/releases"><img src="https://img.shields.io/github/downloads/CraigKettleman/qoder2pi/total?style=flat-square&color=22c55e" alt="Total downloads" /></a>  
+    <img src="https://img.shields.io/badge/Windows-10%2B-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows 10 or later" />  
+    <img src="https://img.shields.io/badge/macOS-12%2B-0A84FF?style=flat-square&logo=apple&logoColor=white" alt="macOS 12 or later" />  
+    <img src="https://img.shields.io/badge/Linux-x64-64748b?style=flat-square&logo=linux&logoColor=white" alt="Linux x64" />  
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-A855F7?style=flat-square" alt="License: MIT" /></a>  
 </p>
 
