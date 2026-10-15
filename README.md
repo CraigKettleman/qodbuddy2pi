@@ -23,10 +23,6 @@
 </p>
 
 <p align="center">  
-    <code>curl -fsSL https://raw.githubusercontent.com/CraigKettleman/qoder2pi/main/install.sh | sh</code>  
-</p>
-
-<p align="center">  
     <img src=".github/assets/console-qoder.png" alt="qodbuddy2pi 总控界面" width="820" />  
 </p>
 
