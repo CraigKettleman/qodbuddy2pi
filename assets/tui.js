@@ -245,6 +245,38 @@ const G = {
 };
 
 /** 载入动画的帧，取自 pi-tui 的 loader（盲文点阵）。 */
+/**
+ * 大字字模：每个字母 5 行高、5 列宽，用实心块 █ 拼。
+ *
+ * 终端里没法真的放大字号，所以「大」只能靠字符拼——pi 的欢迎屏也是这么做的
+ * （它用半方块拼出 pi 的标志）。这里只做 QODBUDDY2PI 需要的字符，不引整套
+ * 字库：多出来的字形没人看，还占体积。
+ *
+ * 字母之间留一列空格，读起来才不糊成一片。
+ */
+const BIG_FONT = {
+  Q: [' ███ ', '█   █', '█   █', '█  ██', ' ████'],
+  O: [' ███ ', '█   █', '█   █', '█   █', ' ███ '],
+  D: ['████ ', '█   █', '█   █', '█   █', '████ '],
+  B: ['████ ', '█   █', '████ ', '█   █', '████ '],
+  U: ['█   █', '█   █', '█   █', '█   █', ' ███ '],
+  Y: ['█   █', ' █ █ ', '  █  ', '  █  ', '  █  '],
+  2: [' ███ ', '█   █', '   █ ', '  █  ', '█████'],
+  P: ['████ ', '█   █', '████ ', '█    ', '█    '],
+  I: ['███', ' █ ', ' █ ', ' █ ', '███'],
+};
+
+/** 把一串字符拼成 5 行大字，返回行数组；字模里没有的字符原样占位。 */
+function bigText(text, gap = ' ') {
+  const glyphs = [...text].map((ch) => BIG_FONT[ch] || null);
+  const height = glyphs.reduce((h, g) => Math.max(h, g ? g.length : 1), 1);
+  const lines = [];
+  for (let r = 0; r < height; r += 1) {
+    lines.push(glyphs.map((g) => (g ? (g[r] ?? ' '.repeat(g[0].length)) : text)).join(gap));
+  }
+  return lines;
+}
+
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 const ALT_ON = '\x1b[?1049h';
@@ -738,7 +770,7 @@ function createTui(options) {
     const inner = w - 4;
     const v = readVersion();
     const version = v ? `qodbuddy v${v}` : 'qodbuddy';
-    const title = 'Q O D B U D D Y 2 P I';
+    const tagline = 'Qoder 与 WorkBuddy 已接入 pi';
     const sub = `${state.title}${state.subtitle ? `　·　${state.subtitle}` : ''}`;
     const right = [
       `${C.accent}${C.bold}Welcome${C.reset}`,
@@ -751,8 +783,28 @@ function createTui(options) {
     const sideW = Math.max(...right.map((r) => width(r))) + 2;
     const rows = [];
 
-    // 太窄：只画一行，别把字挤成一团
-    if (inner < 20 + width(title) + sideW + 6) {
+    // 大字：QODBUDDY 一行字模，宽 47 列。放不下就退成单行小标题。
+    const bigLines = bigText('QODBUDDY');
+    const bigW = width(bigLines[0]);
+    const twoLine = bigText('2PI');
+    const twoW = width(twoLine[0]);
+
+    // 宽度分三档，别一挤就全退成单行——
+    //   宽：大字 QODBUDDY + 2PI，右栏 Welcome/Commands
+    //   中：只留大字 QODBUDDY（去掉 2PI，省 7 行），右栏保留
+    //   窄：单行标题
+    // 阈值按「左侧内容 + 竖线 + 右栏 + 一圈留白」实算，别拍脑袋写个大数：
+    // 写大了会让 100 列的终端白白退成单行。
+    const needBig = bigW + 4;
+    const needSide = sideW + 2;
+    // 高度也要够：大字 banner 占约 20 行，矮终端上会把内容区整个挤出屏幕。
+    // 留出 16 行给页签与内容，剩下的才给大字。
+    const rows_ = process.stdout.rows || 24;
+    const tallEnough = rows_ >= 30;
+    const showBig = tallEnough && inner >= needBig + needSide;
+    const showTwo = showBig && rows_ >= 34 && inner >= needBig + needSide + 8;
+
+    if (!showBig) {
       rows.push(`${C.frame}${BOX.bannerTL}${BOX.h.repeat(w - 2)}${BOX.bannerTR}${C.reset}`);
       rows.push(`${C.frame}│${C.reset} ${pad(`${C.accent}${C.bold}QODBUDDY2PI${C.reset}  ${C.faint}${sub}${C.reset}`, inner)} ${C.frame}│${C.reset}`);
       rows.push(`${C.frame}${BOX.bannerBL}${BOX.h.repeat(w - 2)}${BOX.bannerBR}${C.reset}`);
@@ -761,29 +813,31 @@ function createTui(options) {
 
     // 右栏（Welcome/Commands）与左侧内容之间一道竖线，与 pi 一致
     const leftW = inner - sideW - 1; // 行结构 │·左块·│·右块·│，合计 leftW+sideW+5 = w
-    const midW = leftW;
-    const titleIndent = Math.max(0, Math.floor((midW - width(title)) / 2));
 
-    // 左侧内容行：版本号、大字标题、空行、副标题（折行、居中，不再截成 …）。
-    // pi 的头部也是多行居中块：标语一行、模型一行、路径一行。
-    const subSegs = wrapText(sub, Math.max(10, midW - 2)).slice(0, 3);
+    // 左栏：版本号 → 大字 QODBUDDY → 大字 2PI → 标语 → 当前页名。
+    // 空行把大字与文字隔开，整块才不挤——banner 因此比之前高了好几行。
+    const centered = (text) => {
+      const ind = Math.max(0, Math.floor((leftW - width(text)) / 2));
+      return ' '.repeat(ind) + text;
+    };
+    const bigStyled = (l) => centered(`${C.accent}${C.bold}${l}${C.reset}`);
     const leftCells = [
-      `${C.faint}${version}${C.reset}`,
-      ' '.repeat(titleIndent) + `${C.accent}${C.bold}${title}${C.reset}`,
+      ` ${C.faint}${version}${C.reset}`,
       '',
-      ...subSegs.map((seg) => {
-        const indent = Math.max(0, Math.floor((midW - width(seg)) / 2));
-        return ' '.repeat(indent) + `${C.text}${seg}${C.reset}`;
-      }),
+      ...bigLines.map(bigStyled),
+      ...(showTwo ? ['', ...twoLine.map(bigStyled)] : []),
+      '',
+      centered(`${C.text}${tagline}${C.reset}`),
+      '',
+      centered(`${C.muted}${truncate(sub, Math.max(10, leftW - 2))}${C.reset}`),
     ];
+
     // 行数取左右两栏的较大者，短的那栏补空——竖线才不会断
     const height = Math.max(leftCells.length, right.length);
     for (let i = 0; i < height; i += 1) {
       rows.push(`${C.frame}│${C.reset} ${pad(leftCells[i] || '', leftW)}${C.frame}│${C.reset} ${pad(right[i] || '', sideW)}${C.frame}│${C.reset}`);
     }
 
-    // 顶线不写版本号：框内第一行左上角已经有（pi 的欢迎屏也是版本在框内、
-    // 框线干净），两处都写就成了左上角重复。
     return [
       `${C.frame}${BOX.bannerTL}${BOX.h.repeat(w - 2)}${BOX.bannerTR}${C.reset}`,
       ...rows,
@@ -1424,7 +1478,7 @@ const log = {
 module.exports = {
   createTui, C, G, width, pad, truncate, wrapText, panel, termWidth, fillHeight, findCmd, resolveSpawn,
   // 主题：配色、字形、色彩能力探测
-  THEME, BOX, SPINNER, SELECT_BG, detectColorMode, detectAppearance, hexTo256,
+  THEME, BOX, SPINNER, SELECT_BG, BIG_FONT, bigText, detectColorMode, detectAppearance, hexTo256,
   // 共享工具：四个运维/向导文件原本各自声明一份
   readJson, parseModels, readVersion, PI_DIR, AUTH_JSON, DATA_DIR,
   // 供安装器与向导使用的日志前缀（与 shell 脚本的 ==>/!/错误: 保持一致）

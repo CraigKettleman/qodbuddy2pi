@@ -48,17 +48,13 @@ if [ -z "${QODBUDDY_BOOTSTRAPPED:-}" ] && { [ -z "$_self" ] || [ ! -f "$(dirname
     print_platform_hint() { :; }
 
     case "$(uname -s)" in
-      Darwin) os=darwin ;;
-      Linux)  os=linux ;;
+      Darwin|Linux) ;;
       *) echo "错误: 不支持的系统 $(uname -s)。Windows 请用 install.ps1。" >&2; exit 1 ;;
     esac
-    case "$(uname -m)" in
-      arm64|aarch64) arch=arm64 ;;
-      x86_64|amd64)  arch=x64 ;;
-      *) echo "错误: 不支持的架构 $(uname -m)" >&2; exit 1 ;;
-    esac
 
-    asset="qodbuddy2pi-$os-$arch.tar.gz"
+    # 包是平台无关的（纯 JS/TS/JSON，没有编译产物），所以只有一种 tar.gz，
+    # 不按平台分档——按平台分出来的几份内容完全相同。
+    asset="qodbuddy2pi.tar.gz"
     # QODBUDDY_RELEASE_URL 用来指向别处（自建镜像、内网、测试）；平时就是 GitHub
     # 的 latest/download 固定名，所以这个 URL 永远指向最新版。
     url="${QODBUDDY_RELEASE_URL:-https://github.com/$REPO_SLUG/releases/latest/download}/$asset"
@@ -69,8 +65,8 @@ if [ -z "${QODBUDDY_BOOTSTRAPPED:-}" ] && { [ -z "$_self" ] || [ ! -f "$(dirname
     echo "==> 下载 $asset"
     if ! curl -fsSL "$url" -o "$tmp/pkg.tar.gz"; then
       echo "错误: 下载失败：$url" >&2
-      echo "      可能还没有对应平台的 release。可以改用克隆仓库的方式：" >&2
-      echo "        git clone https://github.com/$REPO_SLUG && cd qoder2pi && ./install.sh" >&2
+      echo "      可以改用克隆仓库的方式：" >&2
+      echo "        git clone https://github.com/$REPO_SLUG && cd qodbuddy2pi && ./install.sh" >&2
       exit 1
     fi
     tar -xzf "$tmp/pkg.tar.gz" -C "$tmp"

@@ -68,8 +68,8 @@ $NeedsBootstrap = $env:QODBUDDY_BOOTSTRAPPED -ne "1" -and (
 
 if ($NeedsBootstrap) {
   Write-Host "==> QodBuddy2Pi 安装器"
-  $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
-  $asset = "qodbuddy2pi-win32-$arch.zip"
+  # 包是平台无关的（纯 JS/TS/JSON，没有编译产物），只有一种 zip，不按平台分档。
+  $asset = "qodbuddy2pi.zip"
   $base = if ($env:QODBUDDY_RELEASE_URL) { $env:QODBUDDY_RELEASE_URL } else {
     "https://github.com/CraigKettleman/qoder2pi/releases/latest/download"
   }

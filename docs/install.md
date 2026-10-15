@@ -42,18 +42,22 @@ bun add -g --ignore-scripts qodbuddy2pi && qodbuddy2pi install
 npx --yes qodbuddy2pi install
 ```
 
-**下载压缩包**：到 Releases 页下载 `qodbuddy2pi-<平台>.tar.gz`（Windows 是 `.zip`），
-解开后：
+**下载压缩包**：到 Releases 页下载 `qodbuddy2pi.tar.gz`（Unix）或 `qodbuddy2pi.zip`
+（Windows），解开后：
 
 ```bash
 ./start.sh                         # macOS / Linux
 start.cmd                          # Windows
 ```
 
+包是平台无关的（全是 JS / TS / JSON，没有编译产物），所以只有两种格式、没有平台之分；
+带版本号的同名文件是同一份内容，给需要锁定版本的场景用。
+
 同一个 Release 里带 `SHA256SUMS`，想核对的话：
 
 ```bash
-shasum -a 256 -c SHA256SUMS        # macOS / Linux（Windows 用 Get-FileHash）
+shasum -a 256 -c SHA256SUMS        # macOS / Linux
+Get-FileHash qodbuddy2pi.zip       # Windows（与文件里的值对照）
 ```
 
 **从源码**：
